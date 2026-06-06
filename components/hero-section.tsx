@@ -120,8 +120,6 @@ export function HeroSection({ onSearch, children }: HeroSectionProps) {
           every artist is a rabbit hole waiting to be explored
         </p>
         
-        {children}
-        
         {/* Search bar with Autocomplete */}
         <div className="relative max-w-xl mx-auto mt-12" ref={dropdownRef}>
           <form onSubmit={handleSubmit}>
@@ -173,6 +171,10 @@ export function HeroSection({ onSearch, children }: HeroSectionProps) {
               ))}
             </div>
           )}
+        </div>
+
+        <div className="mt-16">
+          {children}
         </div>
       </div>
 

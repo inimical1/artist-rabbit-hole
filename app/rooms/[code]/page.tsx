@@ -31,7 +31,7 @@ interface RoomQueue {
   spotify_uri: string
   album_art: string
   added_by: string
-  is_played: boolean
+  played: boolean
   votes_to_skip: string[]
 }
 
@@ -81,6 +81,10 @@ export default function RoomPage() {
   }, [code, router])
 
   useEffect(() => {
+    fetchRoomData()
+  }, [fetchRoomData])
+
+  useEffect(() => {
     const checkUser = async () => {
       const { data: { user } } = await supabase.auth.getUser()
       if (!user) {
@@ -93,85 +97,67 @@ export default function RoomPage() {
   }, [router])
 
   useEffect(() => {
-    if (!currentUser || !code) return
+    if (!currentUser || !room?.id) return
 
-    fetchRoomData()
+    const setupSubscriptions = () => {
+      const queueChannel = supabase.channel(`room_queue:${room.id}`)
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'room_queue', filter: `room_id=eq.${room.id}` }, () => {
+          fetchRoomData()
+        })
+        .subscribe()
 
-    const joinRoom = async (roomId: string) => {
-      await supabase.from('room_members').insert({
-        room_id: roomId,
-        user_id: currentUser.id
-      })
+      const membersChannel = supabase.channel(`room_members:${room.id}`)
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'room_members', filter: `room_id=eq.${room.id}` }, () => {
+          fetchRoomData()
+        })
+        .subscribe()
+
+      const reactionsChannel = supabase.channel(`room_reactions:${room.id}`)
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'room_reactions', filter: `room_id=eq.${room.id}` }, (payload) => {
+          const id = Math.random().toString(36).substring(7)
+          const x = Math.floor(Math.random() * 80) + 10
+          setReactions(prev => [...prev, { id, type: payload.new.type, x }])
+          setTimeout(() => {
+            setReactions(prev => prev.filter(r => r.id !== id))
+          }, 3000)
+        })
+        .subscribe()
+
+      return () => {
+        queueChannel.unsubscribe()
+        membersChannel.unsubscribe()
+        reactionsChannel.unsubscribe()
+      }
     }
 
-    const leaveRoom = async (roomId: string) => {
+    const joinRoom = async () => {
+      await supabase.from('room_members').upsert(
+        { room_id: room.id, user_id: currentUser.id }, 
+        { onConflict: 'room_id,user_id' }
+      )
+    }
+
+    const leaveRoom = async () => {
       await supabase.from('room_members')
         .delete()
-        .eq('room_id', roomId)
+        .eq('room_id', room.id)
         .eq('user_id', currentUser.id)
     }
 
-    let roomId: string | null = null
-
-    const init = async () => {
-      const { data: roomData } = await supabase
-        .from('rooms')
-        .select('id')
-        .eq('code', code)
-        .single()
-      
-      if (roomData) {
-        roomId = roomData.id
-        await joinRoom(roomId)
-        
-        // Setup subscriptions
-        const queueChannel = supabase.channel(`room_queue:${roomId}`)
-          .on('postgres_changes', { event: '*', schema: 'public', table: 'room_queue', filter: `room_id=eq.${roomId}` }, () => {
-            fetchRoomData()
-          })
-          .subscribe()
-
-        const membersChannel = supabase.channel(`room_members:${roomId}`)
-          .on('postgres_changes', { event: '*', schema: 'public', table: 'room_members', filter: `room_id=eq.${roomId}` }, () => {
-            fetchRoomData()
-          })
-          .subscribe()
-
-        const reactionsChannel = supabase.channel(`room_reactions:${roomId}`)
-          .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'room_reactions', filter: `room_id=eq.${roomId}` }, (payload) => {
-            const id = Math.random().toString(36).substring(7)
-            const x = Math.floor(Math.random() * 80) + 10
-            setReactions(prev => [...prev, { id, type: payload.new.type, x }])
-            setTimeout(() => {
-              setReactions(prev => prev.filter(r => r.id !== id))
-            }, 3000)
-          })
-          .subscribe()
-
-        return () => {
-          queueChannel.unsubscribe()
-          membersChannel.unsubscribe()
-          reactionsChannel.unsubscribe()
-        }
-      }
-    }
-
-    init()
+    joinRoom()
+    const unsubscribe = setupSubscriptions()
 
     const handleBeforeUnload = () => {
-      if (roomId) {
-        const url = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/rest/v1/room_members?room_id=eq.${roomId}&user_id=eq.${currentUser.id}`
-        navigator.sendBeacon(url, JSON.stringify({}))
-      }
+      leaveRoom()
     }
-
     window.addEventListener('beforeunload', handleBeforeUnload)
 
     return () => {
-      if (roomId) leaveRoom(roomId)
+      leaveRoom()
+      unsubscribe()
       window.removeEventListener('beforeunload', handleBeforeUnload)
     }
-  }, [currentUser, code, fetchRoomData])
+  }, [currentUser, room?.id, fetchRoomData])
 
   useEffect(() => {
     if (queue.length <= 1 && room?.id && !isGettingAiSuggestion && !aiSuggestion) {
@@ -217,16 +203,22 @@ export default function RoomPage() {
   const addToQueue = async (track: any) => {
     if (!room?.id || !currentUser) return
     try {
-      await supabase.from('room_queue').insert({
-        room_id: room.id,
-        song_name: track.name,
-        artist_name: track.artist,
-        spotify_uri: track.uri,
-        album_art: track.albumArt,
-        added_by: currentUser.id,
-        is_played: false,
-        votes_to_skip: []
+      const { data: { session } } = await supabase.auth.getSession()
+      
+      await fetch(`/api/rooms/${code}/queue`, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${session?.access_token}`
+        },
+        body: JSON.stringify({
+          songName: track.name,
+          artistName: track.artist,
+          spotifyUri: track.uri,
+          albumArt: track.albumArt
+        })
       })
+      
       setSearchQuery('')
       setSearchResults([])
       setAiSuggestion(null)

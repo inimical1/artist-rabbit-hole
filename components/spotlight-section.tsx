@@ -2,18 +2,47 @@
 
 import { useEffect, useRef, useState } from 'react'
 
-const TRENDING_ARTISTS = [
-  { name: 'Aphex Twin', color: 'from-purple-900/40' },
-  { name: 'Cocteau Twins', color: 'from-blue-900/40' },
-  { name: 'My Bloody Valentine', color: 'from-pink-900/40' },
-  { name: 'Burial', color: 'from-zinc-900/40' },
+interface TrendingTrack {
+  name: string
+  artist: string
+  listeners: string
+}
+
+const GRADIENTS = [
+  'from-purple-900/60 to-purple-950/20',
+  'from-teal-900/60 to-teal-950/20',
+  'from-orange-900/60 to-orange-950/20',
+  'from-pink-900/60 to-pink-950/20',
+  'from-indigo-900/60 to-indigo-950/20',
 ]
 
+function formatListeners(count: string) {
+  const num = parseInt(count, 10)
+  if (isNaN(num)) return '0 listeners'
+  if (num >= 1000000) return `${(num / 1000000).toFixed(1)}M listeners`
+  if (num >= 1000) return `${(num / 1000).toFixed(1)}K listeners`
+  return `${num} listeners`
+}
+
 export function SpotlightSection() {
+  const [tracks, setTracks] = useState<TrendingTrack[]>([])
   const [isVisible, setIsVisible] = useState(false)
   const sectionRef = useRef<HTMLElement>(null)
 
   useEffect(() => {
+    const fetchTrending = async () => {
+      try {
+        const res = await fetch('/api/trending')
+        if (res.ok) {
+          const data = await res.json()
+          setTracks(data)
+        }
+      } catch (error) {
+        console.error('Failed to fetch trending:', error)
+      }
+    }
+    fetchTrending()
+
     const observer = new IntersectionObserver(
       (entries) => {
         if (entries[0].isIntersecting) {
@@ -30,6 +59,8 @@ export function SpotlightSection() {
     return () => observer.disconnect()
   }, [])
 
+  if (tracks.length === 0) return null
+
   return (
     <section 
       ref={sectionRef}
@@ -38,23 +69,25 @@ export function SpotlightSection() {
       <div className="max-w-screen-2xl mx-auto">
         <span className="text-muted-foreground text-[10px] uppercase tracking-[0.4em] mb-24 block">SPOTLIGHT</span>
         
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-0">
-          {TRENDING_ARTISTS.map((artist, i) => (
+        <div className="flex gap-4 overflow-x-auto pb-12 scrollbar-hide">
+          {tracks.map((track, i) => (
             <div 
-              key={artist.name}
-              className={`relative h-[600px] flex flex-col justify-end p-12 transition-all duration-[1.2s] ease-out bg-gradient-to-b ${artist.color} to-black`}
+              key={`${track.name}-${i}`}
+              className={`relative h-[500px] w-[350px] flex-shrink-0 flex flex-col justify-end p-12 transition-all duration-[1.2s] ease-out bg-gradient-to-b ${GRADIENTS[i % GRADIENTS.length]} rounded-2xl`}
               style={{
                 opacity: isVisible ? 1 : 0,
                 transform: isVisible ? 'translateY(0)' : 'translateY(40px)',
-                transitionDelay: `${i * 150}ms`,
+                transitionDelay: `${i * 100}ms`,
               }}
             >
-              <span className="text-[10px] uppercase tracking-[0.4em] text-white/40 mb-4 block">Trending</span>
-              <h3 className="font-mono font-bold text-5xl text-foreground uppercase tracking-tight leading-none mb-4">
-                {artist.name}
+              <h3 className="font-mono font-bold text-4xl text-foreground uppercase tracking-tight leading-none mb-4 break-words">
+                {track.name}
               </h3>
-              <p className="text-muted-foreground text-[11px] uppercase tracking-widest opacity-60">
-                Exploring the echoes of influence and the textures of sound.
+              <p className="text-white/80 font-heading text-xl mb-4">
+                {track.artist}
+              </p>
+              <p className="text-white/40 text-[11px] uppercase tracking-widest">
+                {formatListeners(track.listeners)}
               </p>
             </div>
           ))}

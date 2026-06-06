@@ -11,7 +11,7 @@ export async function GET(
   { params }: { params: { code: string } }
 ) {
   try {
-    const { code } = params
+    const { code } = await params
 
     // Fetch room details by room_code
     const { data: room, error: roomError } = await supabase
@@ -58,7 +58,7 @@ export async function PATCH(
   { params }: { params: { code: string } }
 ) {
   try {
-    const { code } = params
+    const { code } = await params
     const body = await request.json()
 
     // Find the room ID first

@@ -92,7 +92,7 @@ export default function Home() {
       <LoadingOverlay isVisible={isLoading} />
       
       {/* Spotify Connection Banner */}
-      {user && !isSpotifyConnected && (
+      {user && !isSpotifyConnected && !isLoading && !artistData && (
         <div className="absolute top-24 left-1/2 -translate-x-1/2 z-50 animate-in fade-in slide-in-from-top-4 duration-500">
           <a href="/api/auth/spotify">
             <Button 
