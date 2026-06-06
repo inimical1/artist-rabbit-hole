@@ -25,34 +25,33 @@ export async function GET(request: Request) {
     })
 
     const tokens = await tokenResponse.json()
-    console.log('Spotify token response:', JSON.stringify(tokens))
 
     if (tokens.error) {
       console.error('Spotify token exchange error:', tokens.error)
       return NextResponse.redirect(new URL('/', request.url))
     }
 
-    const response = NextResponse.redirect(new URL('/', request.url))
+    // Instead of redirecting, return an HTML page that sets cookies via JavaScript
+    // then redirects — this guarantees cookies are set before navigation
+    const html = `
+      <!DOCTYPE html>
+      <html>
+        <head><title>Connecting Spotify...</title></head>
+        <body>
+          <script>
+            document.cookie = 'spotify_access_token=${tokens.access_token}; path=/; max-age=${tokens.expires_in}; samesite=lax';
+            document.cookie = 'spotify_refresh_token=${tokens.refresh_token}; path=/; max-age=${60 * 60 * 24 * 30}; samesite=lax';
+            window.location.href = '/';
+          </script>
+          <p>Connecting to Spotify...</p>
+        </body>
+      </html>
+    `
 
-    response.cookies.set('spotify_access_token', tokens.access_token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
-      maxAge: tokens.expires_in,
-      path: '/',
+    return new Response(html, {
+      headers: { 'Content-Type': 'text/html' },
     })
 
-    if (tokens.refresh_token) {
-      response.cookies.set('spotify_refresh_token', tokens.refresh_token, {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: 'lax',
-        maxAge: 60 * 60 * 24 * 30, // 30 days
-        path: '/',
-      })
-    }
-
-    return response
   } catch (error) {
     console.error('Spotify callback error:', error)
     return NextResponse.redirect(new URL('/', request.url))

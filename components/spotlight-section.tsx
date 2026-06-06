@@ -26,7 +26,7 @@ function formatListeners(count: string) {
 
 export function SpotlightSection() {
   const [tracks, setTracks] = useState<TrendingTrack[]>([])
-  const [isVisible, setIsVisible] = useState(false)
+  const [isVisible, setIsVisible] = useState(true)
   const sectionRef = useRef<HTMLElement>(null)
 
   useEffect(() => {
@@ -59,7 +59,11 @@ export function SpotlightSection() {
     return () => observer.disconnect()
   }, [])
 
-  if (tracks.length === 0) return null
+  if (tracks.length === 0) return (
+  <section className="py-64 px-8 bg-black">
+    <p className="text-white">Loading trending...</p>
+  </section>
+)
 
   return (
     <section 

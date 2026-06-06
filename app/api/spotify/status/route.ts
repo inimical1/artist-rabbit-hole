@@ -6,16 +6,13 @@ export async function GET() {
   const hasAccessToken = cookieStore.has('spotify_access_token')
   const hasRefreshToken = cookieStore.has('spotify_refresh_token')
   
-  // Log cookies for debugging (server-side console)
-  console.log('Spotify Status Check - Cookies present:', {
+  console.log('Spotify Status Check:', {
     hasAccessToken,
     hasRefreshToken,
-    cookieCount: (await cookieStore).getAll().length
+    allCookies: cookieStore.getAll().map(c => c.name)
   })
 
-  // We consider it connected if we have at least a refresh token 
-  // (since the access token can be refreshed)
-  return NextResponse.json({ 
-    connected: hasAccessToken || hasRefreshToken 
+  return NextResponse.json({
+    connected: hasAccessToken || hasRefreshToken
   })
 }
