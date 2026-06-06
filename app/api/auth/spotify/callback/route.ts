@@ -39,9 +39,8 @@ export async function GET(request: Request) {
         <head><title>Connecting Spotify...</title></head>
         <body>
           <script>
-            document.cookie = 'spotify_access_token=${tokens.access_token}; path=/; max-age=${tokens.expires_in}; samesite=lax';
-            document.cookie = 'spotify_refresh_token=${tokens.refresh_token}; path=/; max-age=${60 * 60 * 24 * 30}; samesite=lax';
-            window.location.href = '/';
+            document.cookie = 'spotify_access_token=${tokens.access_token}; path=/; max-age=${tokens.expires_in}; samesite=lax; secure';
+            document.cookie = 'spotify_refresh_token=${tokens.refresh_token}; path=/; max-age=${60 * 60 * 24 * 30}; samesite=lax; secure';
           </script>
           <p>Connecting to Spotify...</p>
         </body>
