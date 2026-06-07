@@ -7,7 +7,15 @@ interface SpotifyArtist {
   image: string
 }
 
-export function SpotifyTopArtists({ onArtistClick, compact = false }: { onArtistClick: (name: string) => void, compact?: boolean }) {
+export function SpotifyTopArtists({ 
+  onArtistClick, 
+  compact = false,
+  onError 
+}: { 
+  onArtistClick: (name: string) => void, 
+  compact?: boolean,
+  onError?: () => void
+}) {
   const [artists, setArtists] = useState<SpotifyArtist[]>([])
   const [loading, setLoading] = useState(true)
 
@@ -18,6 +26,9 @@ export function SpotifyTopArtists({ onArtistClick, compact = false }: { onArtist
         if (response.ok) {
           const data = await response.json()
           setArtists(data)
+        } else if (response.status === 401 || response.status === 403) {
+          // If the token is invalid or expired, notify the parent to show the connect button
+          onError?.()
         }
       } catch (error) {
         console.error('Failed to fetch top artists:', error)

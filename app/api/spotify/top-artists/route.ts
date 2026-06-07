@@ -37,6 +37,17 @@ export async function GET() {
     console.log("SPOTIFY RAW RESPONSE:", text)
     console.log("SPOTIFY STATUS:", response.status)
 
+    if (response.status === 403 || response.status === 401) {
+      console.log("DEBUG: Access denied or unauthorized. Clearing tokens.");
+      const cookieStore = await cookies()
+      cookieStore.delete('spotify_access_token')
+      cookieStore.delete('spotify_refresh_token')
+      return NextResponse.json(
+        { error: 'Spotify session expired or access denied. Please reconnect.', needsReconnect: true },
+        { status: response.status }
+      )
+    }
+
     if (!response.ok) {
       return NextResponse.json(
         {

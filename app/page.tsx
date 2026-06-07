@@ -111,7 +111,14 @@ export default function Home() {
       {/* Hero Section */}
       <HeroSection onSearch={handleSearch}>
         {isSpotifyConnected && (
-          <SpotifyTopArtists onArtistClick={handleArtistClick} compact />
+          <SpotifyTopArtists 
+            onArtistClick={handleArtistClick} 
+            compact 
+            onError={() => {
+              console.log("Spotify error detected in Home, showing connect button");
+              setIsSpotifyConnected(false);
+            }}
+          />
         )}
       </HeroSection>
       

@@ -44,11 +44,13 @@ async function refreshSpotifyToken(refreshToken: string) {
     }
 
     const cookieStore = await cookies()
+    // Match the client-side cookie settings for consistency
     cookieStore.set('spotify_access_token', tokens.access_token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
+      path: '/',
       maxAge: tokens.expires_in,
+      sameSite: 'lax',
+      secure: true,
+      httpOnly: false // Must be accessible for status checks if needed, but primarily for consistency
     })
 
     return tokens.access_token
