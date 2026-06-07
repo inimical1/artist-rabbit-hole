@@ -3,32 +3,57 @@ import { getSpotifyAccessToken } from '@/lib/spotify'
 
 export async function GET() {
   const accessToken = await getSpotifyAccessToken()
+  console.log("DEBUG: SPOTIFY TOP ARTISTS - TOKEN EXISTS:", !!accessToken)
 
   if (!accessToken) {
     return NextResponse.json({ error: 'Not authenticated with Spotify' }, { status: 401 })
   }
 
   try {
-    const response = await fetch('https://api.spotify.com/v1/me/top/artists?limit=10&time_range=medium_term', {
+    // Get user details for logging
+    const meRes = await fetch('https://api.spotify.com/v1/me', {
+      headers: { Authorization: `Bearer ${accessToken}` }
+    })
+    if (meRes.ok) {
+      const meData = await meRes.json()
+      console.log("DEBUG: SPOTIFY USER:", { email: meData.email, id: meData.id })
+    } else {
+      console.log("DEBUG: FAILED TO FETCH USER INFO", meRes.status)
+    }
+
+    const endpoint = 'https://api.spotify.com/v1/me/top/artists?limit=10&time_range=medium_term'
+    console.log("DEBUG: CALLING SPOTIFY ENDPOINT:", endpoint)
+
+    const response = await fetch(endpoint, {
       headers: {
         Authorization: `Bearer ${accessToken}`,
       },
     })
 
-    const data = await response.json()
-    
-    if (data.error) {
-      return NextResponse.json({ error: data.error.message }, { status: data.error.status })
+    const text = await response.text()
+    console.log("SPOTIFY RAW RESPONSE:", text)
+    console.log("SPOTIFY STATUS:", response.status)
+
+    if (!response.ok) {
+      return NextResponse.json(
+        {
+          error: text,
+          status: response.status
+        },
+        { status: response.status }
+      )
     }
 
+    const data = JSON.parse(text)
+    
     const artists = data.items.map((artist: any) => ({
       name: artist.name,
       image: artist.images[0]?.url,
     }))
 
     return NextResponse.json(artists)
-  } catch (error) {
+  } catch (error: any) {
     console.error('Top artists fetch error:', error)
-    return NextResponse.json({ error: 'Failed to fetch top artists' }, { status: 500 })
+    return NextResponse.json({ error: error.message || 'Failed to fetch top artists' }, { status: 500 })
   }
 }
