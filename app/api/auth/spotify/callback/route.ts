@@ -4,7 +4,11 @@ export async function GET(request: Request) {
   const { searchParams } = new URL(request.url)
   const code = searchParams.get('code')
 
+  console.log("Incoming callback URL:", request.url)
+  console.log("Authorization code received:", code)
+
   if (!code) {
+    console.error("No authorization code received")
     return NextResponse.redirect(new URL('/', request.url))
   }
 
@@ -25,7 +29,8 @@ export async function GET(request: Request) {
     })
 
     const text = await tokenResponse.text()
-    console.log("SPOTIFY RAW RESPONSE (token exchange):", text)
+    console.log("Token exchange response status:", tokenResponse.status)
+    console.log("Token exchange response body:", text)
 
     if (!tokenResponse.ok) {
       console.error('Spotify token exchange error status:', tokenResponse.status)
@@ -39,6 +44,9 @@ export async function GET(request: Request) {
       return NextResponse.redirect(new URL('/', request.url))
     }
 
+    console.log("Session/cookies will be written in the client-side script")
+    console.log("Final redirect URL: /")
+
     // Instead of redirecting, return an HTML page that sets cookies via JavaScript
     // then redirects — this guarantees cookies are set before navigation
     const html = `
@@ -47,8 +55,11 @@ export async function GET(request: Request) {
         <head><title>Connecting Spotify...</title></head>
         <body>
           <script>
+            console.log("Setting Spotify cookies...");
             document.cookie = 'spotify_access_token=${tokens.access_token}; path=/; max-age=${tokens.expires_in}; samesite=lax; secure';
             document.cookie = 'spotify_refresh_token=${tokens.refresh_token}; path=/; max-age=${60 * 60 * 24 * 30}; samesite=lax; secure';
+            console.log("Cookies set, redirecting to home...");
+            window.location.href = '/';
           </script>
           <p>Connecting to Spotify...</p>
         </body>
