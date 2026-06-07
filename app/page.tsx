@@ -21,13 +21,16 @@ export default function Home() {
 
   useEffect(() => {
     const checkStatus = async () => {
+      console.log("Checking Spotify status...");
       const { data: { user } } = await supabase.auth.getUser()
+      console.log("Supabase User:", user ? user.email : "Not logged in");
       setUser(user)
 
       if (user) {
         try {
           const res = await fetch('/api/spotify/status')
           const data = await res.json()
+          console.log("Spotify Status Response:", data);
           setIsSpotifyConnected(data.connected)
         } catch (error) {
           console.error('Failed to check Spotify status:', error)
@@ -37,6 +40,7 @@ export default function Home() {
     checkStatus()
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      console.log("Auth State Changed:", _event, session?.user?.email);
       setUser(session?.user ?? null)
     })
 
@@ -92,8 +96,8 @@ export default function Home() {
       <LoadingOverlay isVisible={isLoading} />
       
       {/* Spotify Connection Banner */}
-      {user && !isSpotifyConnected && !isLoading && !artistData && (
-        <div className="absolute top-24 left-1/2 -translate-x-1/2 z-50 animate-in fade-in slide-in-from-top-4 duration-500">
+      {!isSpotifyConnected && !isLoading && !artistData && (
+        <div className="absolute top-24 left-1/2 -translate-x-1/2 z-[60] animate-in fade-in slide-in-from-top-4 duration-500">
           <a href="/api/auth/spotify">
             <Button 
               className="bg-[#1DB954] hover:bg-[#1ed760] text-black font-bold font-heading rounded-full px-6 shadow-xl"
