@@ -29,8 +29,7 @@ if (!response.ok) {
 }
 
 const data = JSON.parse(text)
-const tracks = data.tracks.items.map((track: any) => ({
-...
+    const tracks = data.tracks.items.map((track: any) => ({
       id: track.id,
       name: track.name,
       artist: track.artists.map((a: any) => a.name).join(', '),
