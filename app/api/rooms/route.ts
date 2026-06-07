@@ -14,20 +14,33 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Name and genre are required' }, { status: 400 })
     }
 
+    // Get user from auth
+    const authHeader = request.headers.get('Authorization')
+    const token = authHeader?.split(' ')[1]
+    
+    let userId = null
+    if (token) {
+      const { data: { user } } = await supabase.auth.getUser(token)
+      userId = user?.id
+    }
+
     // Generate a random 6-character room code
     const code = Math.random().toString(36).substring(2, 8).toUpperCase()
 
-    const { data, error } = await supabase
+    const { data: newRoom, error } = await supabase
       .from('rooms')
       .insert([
-        { name, genre, host_id: null, room_code: code }
+        { name, genre, host_id: userId, room_code: code }
       ])
       .select()
       .single()
 
     if (error) throw error
 
-    return NextResponse.json(data)
+    // Create initial playback record
+    await supabase.from('room_playback').insert({ room_id: newRoom.id })
+
+    return NextResponse.json(newRoom)
   } catch (error: any) {
     console.error('Create Room Error:', error)
     return NextResponse.json({ error: error.message }, { status: 500 })

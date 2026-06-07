@@ -1,9 +1,10 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { Button } from '@/components/ui/button'
+import YouTube from 'react-youtube'
 import { 
   Music, 
   Users, 
@@ -13,7 +14,11 @@ import {
   Plus, 
   SkipForward, 
   Sparkles,
-  Loader2
+  Loader2,
+  Play,
+  Pause,
+  RefreshCw,
+  ExternalLink
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -22,17 +27,28 @@ interface Room {
   name: string
   genre: string
   code: string
+  host_id: string
 }
 
 interface RoomQueue {
   id: string
   song_name: string
   artist_name: string
-  spotify_uri: string
+  youtube_video_id: string
   album_art: string
   added_by: string
   played: boolean
   votes_to_skip: string[]
+}
+
+interface RoomPlayback {
+  room_id: string
+  youtube_video_id: string | null
+  song_name: string | null
+  artist_name: string | null
+  is_playing: boolean
+  playback_position: number
+  updated_at: string
 }
 
 interface RoomMember {
@@ -63,15 +79,36 @@ export default function RoomPage() {
   const [aiSuggestion, setAiSuggestion] = useState<any>(null)
   const [isGettingAiSuggestion, setIsGettingAiSuggestion] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
+  
+  const [playback, setPlayback] = useState<RoomPlayback | null>(null)
+  const playerRef = useRef<any>(null)
+  const isHost = currentUser?.id === room?.host_id
 
   const fetchRoomData = useCallback(async () => {
     try {
       const response = await fetch(`/api/rooms/${code}`)
       if (!response.ok) throw new Error('Room not found')
       const data = await response.json()
-      setRoom({ id: data.id, name: data.name, genre: data.genre, code: data.code })
+      setRoom({ 
+        id: data.id, 
+        name: data.name, 
+        genre: data.genre, 
+        code: data.room_code,
+        host_id: data.host_id 
+      })
       setQueue(data.queue || [])
       setMembers(data.members || [])
+      
+      // Fetch initial playback state
+      const { data: playbackData } = await supabase
+        .from('room_playback')
+        .select('*')
+        .eq('room_id', data.id)
+        .single()
+      
+      if (playbackData) {
+        setPlayback(playbackData)
+      }
     } catch (error) {
       console.error('Error fetching room:', error)
       router.push('/rooms')
@@ -112,6 +149,29 @@ export default function RoomPage() {
         })
         .subscribe()
 
+      const playbackChannel = supabase.channel(`room_playback:${room.id}`)
+        .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'room_playback', filter: `room_id=eq.${room.id}` }, (payload) => {
+          const newPlayback = payload.new as RoomPlayback
+          setPlayback(newPlayback)
+          
+          if (!isHost && playerRef.current) {
+            const player = playerRef.current
+            // Sync play/pause
+            if (newPlayback.is_playing) {
+              player.playVideo()
+            } else {
+              player.pauseVideo()
+            }
+            
+            // Sync timestamp if more than 2 seconds off
+            const currentTime = player.getCurrentTime()
+            if (Math.abs(currentTime - newPlayback.playback_position) > 2) {
+              player.seekTo(newPlayback.playback_position)
+            }
+          }
+        })
+        .subscribe()
+
       const reactionsChannel = supabase.channel(`room_reactions:${room.id}`)
         .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'room_reactions', filter: `room_id=eq.${room.id}` }, (payload) => {
           const id = Math.random().toString(36).substring(7)
@@ -126,6 +186,7 @@ export default function RoomPage() {
       return () => {
         queueChannel.unsubscribe()
         membersChannel.unsubscribe()
+        playbackChannel.unsubscribe()
         reactionsChannel.unsubscribe()
       }
     }
@@ -157,7 +218,24 @@ export default function RoomPage() {
       unsubscribe()
       window.removeEventListener('beforeunload', handleBeforeUnload)
     }
-  }, [currentUser, room?.id, fetchRoomData])
+  }, [currentUser, room?.id, fetchRoomData, isHost])
+
+  // Host broadcast logic
+  useEffect(() => {
+    if (!isHost || !room?.id || !playback?.is_playing) return
+
+    const interval = setInterval(async () => {
+      if (playerRef.current) {
+        const currentTime = playerRef.current.getCurrentTime()
+        await supabase
+          .from('room_playback')
+          .update({ playback_position: currentTime, updated_at: new Date().toISOString() })
+          .eq('room_id', room.id)
+      }
+    }, 3000)
+
+    return () => clearInterval(interval)
+  }, [isHost, room?.id, playback?.is_playing])
 
   useEffect(() => {
     if (queue.length <= 1 && room?.id && !isGettingAiSuggestion && !aiSuggestion) {
@@ -190,7 +268,7 @@ export default function RoomPage() {
     if (!searchQuery.trim()) return
     setIsSearching(true)
     try {
-      const response = await fetch(`/api/spotify/search?q=${encodeURIComponent(searchQuery)}`)
+      const response = await fetch(`/api/rooms/youtube-search?q=${encodeURIComponent(searchQuery)}`)
       const data = await response.json()
       setSearchResults(data)
     } catch (error) {
@@ -200,7 +278,7 @@ export default function RoomPage() {
     }
   }
 
-  const addToQueue = async (track: any) => {
+  const addToQueue = async (video: any) => {
     if (!room?.id || !currentUser) return
     try {
       const { data: { session } } = await supabase.auth.getSession()
@@ -212,18 +290,120 @@ export default function RoomPage() {
           'Authorization': `Bearer ${session?.access_token}`
         },
         body: JSON.stringify({
-          songName: track.name,
-          artistName: track.artist,
-          spotifyUri: track.uri,
-          albumArt: track.albumArt
+          songName: video.title,
+          artistName: video.channelName,
+          youtubeVideoId: video.videoId,
+          thumbnail: video.thumbnail
         })
       })
       
+      // If nothing is playing, update playback to this song
+      if (!playback?.youtube_video_id) {
+        await supabase
+          .from('room_playback')
+          .update({
+            youtube_video_id: video.videoId,
+            song_name: video.title,
+            artist_name: video.channelName,
+            is_playing: true,
+            playback_position: 0
+          })
+          .eq('room_id', room.id)
+      }
+
       setSearchQuery('')
       setSearchResults([])
       setAiSuggestion(null)
     } catch (error) {
       console.error('Error adding to queue:', error)
+    }
+  }
+
+  const togglePlayback = async () => {
+    if (!isHost || !room?.id || !playback) return
+    const newState = !playback.is_playing
+    await supabase
+      .from('room_playback')
+      .update({ is_playing: newState })
+      .eq('room_id', room.id)
+  }
+
+  const skipToNext = async () => {
+    if (!isHost || !room?.id) return
+    
+    // Mark current song as played
+    if (queue[0]) {
+      await fetch(`/api/rooms/${code}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'mark_as_played', songId: queue[0].id })
+      })
+    }
+
+    // Get next song
+    const nextSong = queue[1]
+    if (nextSong) {
+      await supabase
+        .from('room_playback')
+        .update({
+          youtube_video_id: nextSong.youtube_video_id,
+          song_name: nextSong.song_name,
+          artist_name: nextSong.artist_name,
+          is_playing: true,
+          playback_position: 0
+        })
+        .eq('room_id', room.id)
+    } else {
+      await supabase
+        .from('room_playback')
+        .update({
+          youtube_video_id: null,
+          song_name: null,
+          artist_name: null,
+          is_playing: false,
+          playback_position: 0
+        })
+        .eq('room_id', room.id)
+    }
+  }
+
+  const syncToHost = () => {
+    if (playerRef.current && playback) {
+      playerRef.current.seekTo(playback.playback_position)
+      if (playback.is_playing) {
+        playerRef.current.playVideo()
+      } else {
+        playerRef.current.pauseVideo()
+      }
+    }
+  }
+
+  const onPlayerReady = (event: any) => {
+    playerRef.current = event.target
+    if (playback) {
+      event.target.seekTo(playback.playback_position)
+      if (playback.is_playing) {
+        event.target.playVideo()
+      } else {
+        event.target.pauseVideo()
+      }
+    }
+  }
+
+  const onPlayerStateChange = async (event: any) => {
+    if (!isHost) return
+    
+    // 1 = playing, 2 = paused
+    if (event.data === 1 && !playback?.is_playing) {
+      await supabase.from('room_playback').update({ is_playing: true }).eq('room_id', room!.id)
+    } else if (event.data === 2 && playback?.is_playing) {
+      await supabase.from('room_playback').update({ is_playing: false }).eq('room_id', room!.id)
+    }
+  }
+
+  const onPlayerEnd = () => {
+    if (isHost) {
+      skipToNext()
     }
   }
 
@@ -249,26 +429,11 @@ export default function RoomPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'mark_as_played', songId })
       })
+      if (isHost) skipToNext()
     } else {
       await supabase.from('room_queue')
         .update({ votes_to_skip: newVotes })
         .eq('id', songId)
-    }
-  }
-
-  const addToSpotify = async (uri: string) => {
-    try {
-      const response = await fetch(`/api/spotify/queue?uri=${encodeURIComponent(uri)}`, {
-        method: 'POST'
-      })
-      if (response.ok) {
-        alert('Added to your Spotify queue!')
-      } else {
-        const data = await response.json()
-        alert(`Error: ${data.error}`)
-      }
-    } catch (error) {
-      console.error('Spotify queue error:', error)
     }
   }
 
@@ -285,7 +450,6 @@ export default function RoomPage() {
     )
   }
 
-  const nowPlaying = queue[0]
   const upcomingQueue = queue.slice(1)
 
   return (
@@ -315,61 +479,106 @@ export default function RoomPage() {
 
       <div className="max-w-7xl mx-auto px-4 py-8 grid grid-cols-1 lg:grid-cols-12 gap-8">
         {/* Left Column: Now Playing */}
-        <div className="lg:col-span-3 space-y-6">
+        <div className="lg:col-span-4 space-y-6">
           <h2 className="text-xl font-bold font-heading flex items-center gap-2">
             <Music className="text-purple-500" /> Now Playing
           </h2>
-          {nowPlaying ? (
-            <div className="space-y-4">
-              <div className="aspect-square rounded-xl overflow-hidden bg-zinc-900 border border-zinc-800 shadow-2xl shadow-purple-500/10">
-                <img src={nowPlaying.album_art} alt={nowPlaying.song_name} className="w-full h-full object-cover" />
+          
+          <div className="space-y-4">
+            <div className="aspect-video rounded-xl overflow-hidden bg-zinc-900 border border-zinc-800 shadow-2xl shadow-purple-500/10">
+              {playback?.youtube_video_id ? (
+                <YouTube
+                  videoId={playback.youtube_video_id}
+                  onReady={onPlayerReady}
+                  onStateChange={onPlayerStateChange}
+                  onEnd={onPlayerEnd}
+                  opts={{
+                    width: '100%',
+                    height: '100%',
+                    playerVars: {
+                      autoplay: 1,
+                      controls: isHost ? 1 : 0,
+                      disablekb: isHost ? 0 : 1,
+                      fs: 0,
+                      modestbranding: 1,
+                      rel: 0
+                    }
+                  }}
+                  className="w-full h-full"
+                />
+              ) : (
+                <div className="w-full h-full flex items-center justify-center text-zinc-600 italic">
+                  Waiting for host to start playback
+                </div>
+              )}
+            </div>
+
+            {playback?.song_name && (
+              <div className="space-y-2">
+                <h3 className="text-xl font-bold leading-tight">{playback.song_name}</h3>
+                <p className="text-zinc-400">{playback.artist_name}</p>
               </div>
-              <div>
-                <h3 className="text-lg font-bold truncate">{nowPlaying.song_name}</h3>
-                <p className="text-zinc-400 truncate">{nowPlaying.artist_name}</p>
+            )}
+
+            {isHost ? (
+              <div className="flex gap-2">
+                <Button 
+                  onClick={togglePlayback}
+                  className="flex-1 bg-purple-600 hover:bg-purple-700"
+                >
+                  {playback?.is_playing ? <><Pause className="mr-2 h-4 w-4" /> Pause</> : <><Play className="mr-2 h-4 w-4" /> Play</>}
+                </Button>
+                <Button 
+                  variant="outline"
+                  onClick={skipToNext}
+                  className="border-zinc-800"
+                >
+                  <SkipForward className="h-4 w-4" />
+                </Button>
               </div>
-              <div className="flex flex-wrap gap-2 pt-4">
-                {['🔥', '😭', '🌊', '💀', '✨'].map(emoji => (
-                  <button
-                    key={emoji}
-                    onClick={() => sendReaction(emoji)}
-                    className="w-12 h-12 flex items-center justify-center bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 rounded-full transition-all hover:scale-110 active:scale-95 text-2xl"
-                  >
-                    {emoji}
-                  </button>
-                ))}
-              </div>
+            ) : (
+              <Button 
+                variant="outline" 
+                className="w-full border-zinc-800"
+                onClick={syncToHost}
+              >
+                <RefreshCw className="mr-2 h-4 w-4" /> Sync to Host
+              </Button>
+            )}
+
+            <div className="flex flex-wrap gap-2 pt-4">
+              {['🔥', '😭', '🌊', '💀', '✨'].map(emoji => (
+                <button
+                  key={emoji}
+                  onClick={() => sendReaction(emoji)}
+                  className="w-10 h-10 flex items-center justify-center bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 rounded-full transition-all hover:scale-110 active:scale-95 text-xl"
+                >
+                  {emoji}
+                </button>
+              ))}
+            </div>
+
+            {queue[0] && (
               <Button 
                 variant="outline" 
                 className="w-full border-zinc-800 hover:bg-zinc-900 text-zinc-300"
-                onClick={() => voteSkip(nowPlaying.id, nowPlaying.votes_to_skip || [])}
+                onClick={() => voteSkip(queue[0].id, queue[0].votes_to_skip || [])}
               >
                 <SkipForward className="mr-2 h-4 w-4" /> 
-                Vote Skip ({nowPlaying.votes_to_skip?.length || 0}/{Math.ceil(members.length * 0.5)})
+                Vote Skip ({queue[0].votes_to_skip?.length || 0}/{Math.ceil(members.length * 0.5)})
               </Button>
-              <Button 
-                variant="ghost" 
-                className="w-full text-zinc-500 hover:text-white"
-                onClick={() => addToSpotify(nowPlaying.spotify_uri)}
-              >
-                <ExternalLink className="mr-2 h-4 w-4" /> Add to Spotify
-              </Button>
-            </div>
-          ) : (
-            <div className="aspect-square rounded-xl bg-zinc-900/50 border border-dashed border-zinc-800 flex items-center justify-center text-zinc-600 italic">
-              Nothing playing yet
-            </div>
-          )}
+            )}
+          </div>
         </div>
 
         {/* Centre Column: Queue */}
-        <div className="lg:col-span-6 space-y-6">
+        <div className="lg:col-span-5 space-y-6">
           <div className="relative">
             <form onSubmit={handleSearch} className="relative">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-500" />
               <input
                 type="text"
-                placeholder="Search tracks to add..."
+                placeholder="Search YouTube Music..."
                 className="w-full bg-zinc-900 border border-zinc-800 rounded-lg py-3 pl-10 pr-4 focus:outline-none focus:ring-2 focus:ring-purple-500/50 transition-all"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
@@ -379,16 +588,16 @@ export default function RoomPage() {
 
             {searchResults.length > 0 && (
               <div className="absolute top-full mt-2 w-full bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden z-20 shadow-2xl">
-                {searchResults.map((track) => (
+                {searchResults.map((video) => (
                   <button
-                    key={track.id}
-                    onClick={() => addToQueue(track)}
+                    key={video.videoId}
+                    onClick={() => addToQueue(video)}
                     className="w-full p-3 flex items-center gap-3 hover:bg-zinc-800 transition-colors text-left border-b border-zinc-800 last:border-0"
                   >
-                    <img src={track.albumArt} className="w-10 h-10 rounded" alt="" />
+                    <img src={video.thumbnail} className="w-12 h-12 rounded object-cover" alt="" />
                     <div className="flex-1 min-w-0">
-                      <div className="font-medium truncate">{track.name}</div>
-                      <div className="text-xs text-zinc-500 truncate">{track.artist}</div>
+                      <div className="font-medium truncate">{video.title}</div>
+                      <div className="text-xs text-zinc-500 truncate">{video.channelName}</div>
                     </div>
                     <Plus className="h-4 w-4 text-zinc-400" />
                   </button>
@@ -399,10 +608,10 @@ export default function RoomPage() {
 
           <div className="space-y-4">
             <h2 className="text-xl font-bold font-heading">Upcoming Queue</h2>
-            <div className="space-y-2">
+            <div className="space-y-2 max-h-[500px] overflow-y-auto pr-2 custom-scrollbar">
               {upcomingQueue.map((song) => (
                 <div key={song.id} className="flex items-center gap-4 p-3 bg-zinc-900/50 border border-zinc-800/50 rounded-xl group hover:border-zinc-700 transition-all">
-                  <img src={song.album_art} className="w-12 h-12 rounded-lg" alt="" />
+                  <img src={song.album_art} className="w-12 h-12 rounded-lg object-cover" alt="" />
                   <div className="flex-1 min-w-0">
                     <div className="font-medium truncate">{song.song_name}</div>
                     <div className="text-sm text-zinc-500 truncate">{song.artist_name}</div>
@@ -438,9 +647,10 @@ export default function RoomPage() {
                 </div>
                 <Button 
                   onClick={() => addToQueue({ 
-                    name: aiSuggestion.songName, 
-                    artist: aiSuggestion.artistName,
-                    albumArt: '/placeholder.svg' // We don't have album art for suggestion yet
+                    title: aiSuggestion.songName, 
+                    channelName: aiSuggestion.artistName,
+                    videoId: aiSuggestion.youtubeVideoId || '', // Assuming AI DJ might provide this soon
+                    thumbnail: '/placeholder.svg'
                   })}
                   className="bg-purple-600 hover:bg-purple-700"
                 >
@@ -491,9 +701,14 @@ export default function RoomPage() {
                     <div className="w-8 h-8 rounded-full bg-gradient-to-br from-zinc-700 to-zinc-800 flex items-center justify-center text-xs font-bold border border-zinc-700">
                       {member.user_id.substring(0, 2).toUpperCase()}
                     </div>
-                    <span className="text-sm text-zinc-300 truncate">
-                      {member.user_id === currentUser?.id ? 'You' : `User ${member.user_id.substring(0, 5)}...`}
-                    </span>
+                    <div className="flex flex-col">
+                      <span className="text-sm text-zinc-300 truncate">
+                        {member.user_id === currentUser?.id ? 'You' : `User ${member.user_id.substring(0, 5)}...`}
+                      </span>
+                      {member.user_id === room?.host_id && (
+                        <span className="text-[10px] text-purple-500 font-bold uppercase tracking-tighter">Host</span>
+                      )}
+                    </div>
                   </div>
                 ))}
               </div>
