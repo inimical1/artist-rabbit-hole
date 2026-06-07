@@ -10,20 +10,6 @@ export async function GET() {
   }
 
   try {
-    // Get user details for logging
-    const meRes = await fetch('https://api.spotify.com/v1/me', {
-      headers: { Authorization: `Bearer ${accessToken}` }
-    })
-    if (meRes.ok) {
-      const meText = await meRes.text()
-      console.log("SPOTIFY RAW RESPONSE (me):", meText)
-      const meData = JSON.parse(meText)
-      console.log("DEBUG: SPOTIFY USER:", { email: meData.email, id: meData.id })
-    } else {
-      const meErrorText = await meRes.text()
-      console.log("DEBUG: FAILED TO FETCH USER INFO", meRes.status, meErrorText)
-    }
-
     const endpoint = 'https://api.spotify.com/v1/me/top/artists?limit=10&time_range=medium_term'
     console.log("DEBUG: CALLING SPOTIFY ENDPOINT:", endpoint)
 
@@ -39,9 +25,13 @@ export async function GET() {
 
     if (response.status === 403 || response.status === 401) {
       console.log("DEBUG: Access denied or unauthorized. Clearing tokens.");
-      const cookieStore = await cookies()
-      cookieStore.delete('spotify_access_token')
-      cookieStore.delete('spotify_refresh_token')
+      try {
+        const cookieStore = await cookies()
+        cookieStore.delete('spotify_access_token')
+        cookieStore.delete('spotify_refresh_token')
+      } catch (e) {
+        console.error("Failed to delete cookies:", e)
+      }
       return NextResponse.json(
         { error: 'Spotify session expired or access denied. Please reconnect.', needsReconnect: true },
         { status: response.status }
@@ -60,14 +50,19 @@ export async function GET() {
 
     const data = JSON.parse(text)
     
+    if (!data.items || !Array.isArray(data.items)) {
+      console.error("Spotify API returned unexpected data structure:", data)
+      return NextResponse.json([], { status: 200 }) // Return empty array instead of failing
+    }
+
     const artists = data.items.map((artist: any) => ({
       name: artist.name,
-      image: artist.images[0]?.url,
+      image: artist.images && artist.images.length > 0 ? artist.images[0].url : null,
     }))
 
     return NextResponse.json(artists)
   } catch (error: any) {
     console.error('Top artists fetch error:', error)
-    return NextResponse.json({ error: error.message || 'Failed to fetch top artists' }, { status: 500 })
+    return NextResponse.json({ error: 'Failed to fetch top artists' }, { status: 500 })
   }
 }
