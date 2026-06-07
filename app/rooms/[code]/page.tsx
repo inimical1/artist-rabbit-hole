@@ -82,7 +82,14 @@ export default function RoomPage() {
   
   const [playback, setPlayback] = useState<RoomPlayback | null>(null)
   const playerRef = useRef<any>(null)
-  const isHost = currentUser?.id === room?.host_id
+  
+  const isHost = currentUser?.id && room?.host_id && currentUser.id === room.host_id
+  
+  useEffect(() => {
+    if (currentUser && room) {
+      console.log('user id:', currentUser.id, 'host id:', room.host_id, 'isHost:', isHost)
+    }
+  }, [currentUser, room, isHost])
 
   const fetchRoomData = useCallback(async () => {
     try {
@@ -106,6 +113,7 @@ export default function RoomPage() {
         .eq('room_id', data.id)
         .single()
       
+      console.log('Playback data fetched:', playbackData)
       if (playbackData) {
         setPlayback(playbackData)
       }
@@ -138,19 +146,35 @@ export default function RoomPage() {
 
     const setupSubscriptions = () => {
       const queueChannel = supabase.channel(`room_queue:${room.id}`)
-        .on('postgres_changes', { event: '*', schema: 'public', table: 'room_queue', filter: `room_id=eq.${room.id}` }, () => {
+        .on('postgres_changes', { 
+          event: '*', 
+          schema: 'public', 
+          table: 'room_queue', 
+          filter: `room_id=eq.${room.id}` 
+        }, () => {
+          console.log('Queue changed, fetching fresh data...')
           fetchRoomData()
         })
         .subscribe()
 
       const membersChannel = supabase.channel(`room_members:${room.id}`)
-        .on('postgres_changes', { event: '*', schema: 'public', table: 'room_members', filter: `room_id=eq.${room.id}` }, () => {
+        .on('postgres_changes', { 
+          event: '*', 
+          schema: 'public', 
+          table: 'room_members', 
+          filter: `room_id=eq.${room.id}` 
+        }, () => {
           fetchRoomData()
         })
         .subscribe()
 
       const playbackChannel = supabase.channel(`room_playback:${room.id}`)
-        .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'room_playback', filter: `room_id=eq.${room.id}` }, (payload) => {
+        .on('postgres_changes', { 
+          event: 'UPDATE', 
+          schema: 'public', 
+          table: 'room_playback', 
+          filter: `room_id=eq.${room.id}` 
+        }, (payload) => {
           const newPlayback = payload.new as RoomPlayback
           setPlayback(newPlayback)
           
@@ -173,7 +197,12 @@ export default function RoomPage() {
         .subscribe()
 
       const reactionsChannel = supabase.channel(`room_reactions:${room.id}`)
-        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'room_reactions', filter: `room_id=eq.${room.id}` }, (payload) => {
+        .on('postgres_changes', { 
+          event: 'INSERT', 
+          schema: 'public', 
+          table: 'room_reactions', 
+          filter: `room_id=eq.${room.id}` 
+        }, (payload) => {
           const id = Math.random().toString(36).substring(7)
           const x = Math.floor(Math.random() * 80) + 10
           setReactions(prev => [...prev, { id, type: payload.new.type, x }])
@@ -283,7 +312,7 @@ export default function RoomPage() {
     try {
       const { data: { session } } = await supabase.auth.getSession()
       
-      await fetch(`/api/rooms/${code}/queue`, {
+      const response = await fetch(`/api/rooms/${code}/queue`, {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
@@ -297,6 +326,8 @@ export default function RoomPage() {
         })
       })
       
+      if (!response.ok) throw new Error('Failed to add to queue')
+
       // If nothing is playing, update playback to this song
       if (!playback?.youtube_video_id) {
         await supabase
@@ -314,6 +345,9 @@ export default function RoomPage() {
       setSearchQuery('')
       setSearchResults([])
       setAiSuggestion(null)
+      
+      // Immediately refresh queue
+      fetchRoomData()
     } catch (error) {
       console.error('Error adding to queue:', error)
     }
@@ -321,10 +355,29 @@ export default function RoomPage() {
 
   const togglePlayback = async () => {
     if (!isHost || !room?.id || !playback) return
+    
+    // If nothing is playing but there are songs in the queue, start the first one
+    if (!playback.youtube_video_id && queue.length > 0) {
+      await supabase
+        .from('room_playback')
+        .upsert({
+          room_id: room.id,
+          youtube_video_id: queue[0].youtube_video_id,
+          song_name: queue[0].song_name,
+          artist_name: queue[0].artist_name,
+          is_playing: true,
+          playback_position: 0,
+          updated_at: new Date().toISOString()
+        }, { onConflict: 'room_id' })
+      return
+    }
+
+    if (!playback.youtube_video_id) return
+
     const newState = !playback.is_playing
     await supabase
       .from('room_playback')
-      .update({ is_playing: newState })
+      .update({ is_playing: newState, updated_at: new Date().toISOString() })
       .eq('room_id', room.id)
   }
 
@@ -365,9 +418,27 @@ export default function RoomPage() {
         })
         .eq('room_id', room.id)
     }
+    // Refresh locally
+    fetchRoomData()
   }
 
-  const syncToHost = () => {
+  const deleteRoom = async () => {
+    if (!isHost || !room?.id) return
+    if (!confirm('Are you sure you want to delete this room?')) return
+    
+    try {
+      const response = await fetch(`/api/rooms/${code}`, {
+        method: 'DELETE'
+      })
+      if (response.ok) {
+        router.push('/rooms')
+      }
+    } catch (error) {
+      console.error('Error deleting room:', error)
+    }
+    }
+
+    const syncToHost = () => {
     if (playerRef.current && playback) {
       playerRef.current.seekTo(playback.playback_position)
       if (playback.is_playing) {
@@ -488,6 +559,7 @@ export default function RoomPage() {
             <div className="aspect-video rounded-xl overflow-hidden bg-zinc-900 border border-zinc-800 shadow-2xl shadow-purple-500/10">
               {playback?.youtube_video_id ? (
                 <YouTube
+                  key={playback.youtube_video_id}
                   videoId={playback.youtube_video_id}
                   onReady={onPlayerReady}
                   onStateChange={onPlayerStateChange}
@@ -689,6 +761,15 @@ export default function RoomPage() {
               >
                 <LogOut className="mr-2 h-4 w-4" /> Leave Room
               </Button>
+              {isHost && (
+                <Button 
+                  variant="destructive"
+                  className="w-full mt-2"
+                  onClick={deleteRoom}
+                >
+                  Delete Room
+                </Button>
+              )}
             </div>
 
             <div className="space-y-4">

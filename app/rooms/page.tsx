@@ -69,13 +69,19 @@ export default function RoomsLobby() {
 
     setIsCreating(true)
     try {
+      const { data: { session } } = await supabase.auth.getSession()
       const res = await fetch('/api/rooms', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${session?.access_token}`
+        },
         body: JSON.stringify({ name: roomName, genre: selectedGenre }),
       })
       const data = await res.json()
-      if (data.code) {
+      if (data.room_code) {
+        router.push(`/rooms/${data.room_code}`)
+      } else if (data.code) {
         router.push(`/rooms/${data.code}`)
       }
     } catch (error) {

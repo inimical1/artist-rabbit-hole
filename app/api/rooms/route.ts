@@ -14,7 +14,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Name and genre are required' }, { status: 400 })
     }
 
-    // Get user from auth
+    // Get user from auth header
     const authHeader = request.headers.get('Authorization')
     const token = authHeader?.split(' ')[1]
     

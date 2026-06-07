@@ -17,6 +17,13 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Room ID is required' }, { status: 400 })
     }
 
+    // Fetch room genre for fallback
+    const { data: roomData } = await supabase
+      .from('rooms')
+      .select('genre')
+      .eq('id', roomId)
+      .single()
+
     // Read the last 5 played songs from 'room_queue' for that room
     const { data: playedSongs, error: fetchError } = await supabase
       .from('room_queue')
@@ -30,7 +37,7 @@ export async function POST(request: Request) {
 
     const songList = playedSongs
       ?.map((s) => `${s.song_name} by ${s.artist_name}`)
-      .join(', ') || 'No songs played yet'
+      .join(', ') || null
 
     if (!process.env.GROQ_API_KEY) {
       return NextResponse.json({ error: 'Groq API key not configured' }, { status: 500 })
@@ -38,6 +45,10 @@ export async function POST(request: Request) {
 
     const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
     
+    const prompt = songList 
+      ? `Based on these recently played songs: [${songList}], suggest the next song that would fit this vibe.`
+      : `The music room genre is ${roomData?.genre || 'mixed'}. Suggest a popular song that fits this genre.`
+
     const completion = await groq.chat.completions.create({
       model: GROQ_MODEL,
       temperature: 0.8,
@@ -45,11 +56,11 @@ export async function POST(request: Request) {
       messages: [
         {
           role: 'system',
-          content: 'You are an AI DJ. Suggest the next song based on a list of recently played songs. Return only a valid JSON object.'
+          content: 'You are an AI DJ. Suggest the next song. Return only a valid JSON object.'
         },
         {
           role: 'user',
-          content: `Based on these songs: [${songList}], suggest the next song that would fit this vibe. 
+          content: `${prompt} 
           Return JSON: { "songName": "string", "artistName": "string", "reason": "string" }`
         }
       ]

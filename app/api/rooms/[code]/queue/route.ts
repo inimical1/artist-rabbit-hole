@@ -11,7 +11,7 @@ export async function POST(
   { params }: { params: { code: string } }
 ) {
   try {
-    const { code } = params
+    const { code } = await params
     const { songName, artistName, youtubeVideoId, thumbnail } = await request.json()
 
     // Get room by room_code
@@ -25,10 +25,10 @@ export async function POST(
       return NextResponse.json({ error: 'Room not found' }, { status: 404 })
     }
 
-    // Get user from auth
+    // Get user from auth header
     const authHeader = request.headers.get('Authorization')
     const token = authHeader?.split(' ')[1]
-    
+
     let userId = null
     if (token) {
       const { data: { user } } = await supabase.auth.getUser(token)
@@ -45,7 +45,7 @@ export async function POST(
         album_art: thumbnail,
         added_by: userId,
         played: false,
-        votes_to_skip: []
+        votes_to_skip: 0
       })
       .select()
       .single()
