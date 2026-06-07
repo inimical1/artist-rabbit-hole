@@ -8,7 +8,7 @@ const supabase = createClient(
 
 export async function GET(
   request: Request,
-  { params }: { params: { code: string } }
+  { params }: { params: Promise<{ code: string }> }
 ) {
   try {
     const { code } = await params
@@ -55,10 +55,10 @@ export async function GET(
 
 export async function DELETE(
   request: Request,
-  { params }: { params: { code: string } }
+  { params }: { params: Promise<{ code: string }> }
 ) {
   try {
-    const { code } = params
+    const { code } = await params
 
     const { error } = await supabase
       .from('rooms')
@@ -70,6 +70,53 @@ export async function DELETE(
     return NextResponse.json({ success: true })
   } catch (error: any) {
     console.error('Delete Room Error:', error)
+    return NextResponse.json({ error: error.message }, { status: 500 })
+  }
+}
+
+export async function PATCH(
+  request: Request,
+  { params }: { params: Promise<{ code: string }> }
+) {
+  try {
+    const { code } = await params
+    const body = await request.json()
+
+    // Find the room ID first
+    const { data: room, error: roomError } = await supabase
+      .from('rooms')
+      .select('id')
+      .eq('room_code', code)
+      .single()
+
+    if (roomError || !room) {
+      return NextResponse.json({ error: 'Room not found' }, { status: 404 })
+    }
+
+    if (body.action === 'mark_as_played' && body.songId) {
+      const { error } = await supabase
+        .from('room_queue')
+        .update({ played: true })
+        .eq('id', body.songId)
+        .eq('room_id', room.id)
+
+      if (error) throw error
+      return NextResponse.json({ success: true })
+    }
+
+    // General room update
+    const { data, error } = await supabase
+      .from('rooms')
+      .update(body)
+      .eq('id', room.id)
+      .select()
+      .single()
+
+    if (error) throw error
+
+    return NextResponse.json(data)
+  } catch (error: any) {
+    console.error('Update Room Error:', error)
     return NextResponse.json({ error: error.message }, { status: 500 })
   }
 }

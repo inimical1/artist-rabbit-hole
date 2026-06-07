@@ -8,11 +8,11 @@ const supabase = createClient(
 
 export async function POST(
   request: Request,
-  { params }: { params: { code: string } }
+  { params }: { params: Promise<{ code: string }> }
 ) {
   try {
     const { code } = await params
-    const { songName, artistName, youtubeVideoId, thumbnail } = await request.json()
+    const { songName, artistName, youtubeVideoId, spotifyUri, thumbnail } = await request.json()
 
     // Get room by room_code
     const { data: room, error: roomError } = await supabase
@@ -42,6 +42,7 @@ export async function POST(
         song_name: songName,
         artist_name: artistName,
         youtube_video_id: youtubeVideoId,
+        spotify_uri: spotifyUri,
         album_art: thumbnail,
         added_by: userId,
         played: false,
@@ -54,7 +55,7 @@ export async function POST(
 
     return NextResponse.json(queueItem)
   } catch (error: any) {
-    console.error('Add to queue error:', error)
-    return NextResponse.json({ error: error.message }, { status: 500 })
+    console.error('Queue error details:', error.message, error.code, error.details)
+    return NextResponse.json({ error: error.message, code: error.code }, { status: 500 })
   }
 }

@@ -1,12 +1,12 @@
 import { cookies } from 'next/headers'
 import { NextResponse } from 'next/server'
 
-export async function POST(request: Request) {
+export async function PUT(request: Request) {
   try {
-    const { uri } = await request.json()
+    const { uri, deviceId } = await request.json()
 
-    if (!uri) {
-      return NextResponse.json({ error: 'Missing uri' }, { status: 400 })
+    if (!uri || !deviceId) {
+      return NextResponse.json({ error: 'Missing uri or deviceId' }, { status: 400 })
     }
 
     const cookieStore = await cookies()
@@ -16,11 +16,15 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
-    const response = await fetch(`https://api.spotify.com/v1/me/player/queue?uri=${encodeURIComponent(uri)}`, {
-      method: 'POST',
+    const response = await fetch(`https://api.spotify.com/v1/me/player/play?device_id=${deviceId}`, {
+      method: 'PUT',
       headers: {
-        'Authorization': `Bearer ${token}`
-      }
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        uris: [uri]
+      })
     })
 
     if (!response.ok) {
@@ -30,7 +34,7 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ success: true })
   } catch (error: any) {
-    console.error('Spotify queue error:', error)
+    console.error('Spotify play error:', error)
     return NextResponse.json({ error: error.message }, { status: 500 })
   }
 }
