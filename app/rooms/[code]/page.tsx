@@ -87,6 +87,7 @@ export default function RoomPage() {
   const [playback, setPlayback] = useState<RoomPlayback | null>(null)
   const [spotifyToken, setSpotifyToken] = useState<string | null>(null)
   const [deviceId, setDeviceId] = useState<string | null>(null)
+  const deviceIdRef = useRef<string | null>(null)
   const [player, setPlayer] = useState<any>(null)
   const playbackRef = useRef<RoomPlayback | null>(null)
   const isAdvancingRef = useRef(false)
@@ -98,6 +99,7 @@ export default function RoomPage() {
     const fetchToken = async () => {
       const res = await fetch('/api/spotify/token')
       const data = await res.json()
+      console.log("DEBUG: SPOTIFY TOKEN LOADED", { hasToken: !!data.token, isProduction: process.env.NODE_ENV === 'production' })
       setSpotifyToken(data.token)
     }
     fetchToken()
@@ -106,26 +108,25 @@ export default function RoomPage() {
   // Initialize Spotify Player for Host
   useEffect(() => {
     if (isHost && spotifyToken && !player) {
-      console.log('DEBUG: Initializing Spotify Player for host...')
+      console.log('DEBUG: SPOTIFY PLAYER INITIALIZING', { isProduction: process.env.NODE_ENV === 'production' })
       const spotifyPlayer = initSpotifyPlayer(
         spotifyToken,
-        (id) => {
-          console.log('DEBUG: Spotify Player Ready with device_id:', id)
+        async (id) => {
+          console.log('DEBUG: SPOTIFY PLAYER READY', { deviceId: id })
           setDeviceId(id)
+          deviceIdRef.current = id
+
+          // Force transfer to browser
+          console.log('DEBUG: Transferring playback to browser SDK...')
+          await fetch('/api/spotify/play', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ deviceId: id, transferOnly: true })
+          })
         },
         async (state) => {
           if (!state) return
-          
-          // Update local playback state from player state if we are the host
-          const { 
-            paused, 
-            position, 
-            duration,
-            track_window: { current_track }
-          } = state
-
-          // Only broadcast if there's a significant change or periodically
-          // (Handled by the broadcast interval below for simplicity)
+          // Monitoring logic can go here
         }
       )
       setPlayer(spotifyPlayer)
@@ -175,15 +176,7 @@ export default function RoomPage() {
         .single()
       
       if (playbackData) {
-        setPlayback(prev => {
-          console.log("DEBUG: PLAYBACK UPDATE (fetchRoomData)", {
-            source: "api_fetch",
-            oldId: prev?.youtube_video_id,
-            newId: playbackData.youtube_video_id,
-            isPlaying: playbackData.is_playing
-          })
-          return playbackData
-        })
+        setPlayback(playbackData)
       }
     } catch (error) {
       console.error('Error fetching room:', error)
@@ -230,26 +223,7 @@ export default function RoomPage() {
       const playbackChannel = supabase.channel(`room_playback:${room.id}`)
         .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'room_playback', filter: `room_id=eq.${room.id}` }, (payload) => {
           const newPlayback = payload.new as any
-          
-          setPlayback(prev => {
-            const merged = { ...prev } as any
-            Object.keys(newPlayback).forEach(key => {
-              if (newPlayback[key] !== undefined && newPlayback[key] !== null) {
-                // Ignore empty strings for IDs
-                if ((key === 'youtube_video_id' || key === 'spotify_uri') && newPlayback[key] === '') return
-                merged[key] = newPlayback[key]
-              }
-            })
-            
-            console.log("SUBSCRIPTION UPDATE", {
-              oldVideoId: prev?.youtube_video_id,
-              oldSpotifyUri: prev?.spotify_uri,
-              newId: merged.youtube_video_id,
-              newSpotifyUri: merged.spotify_uri
-            })
-
-            return merged as RoomPlayback
-          })
+          setPlayback(newPlayback as RoomPlayback)
         })
         .subscribe()
 
@@ -311,14 +285,6 @@ export default function RoomPage() {
 
     return () => clearInterval(interval)
   }, [isHost, room?.id, playback?.is_playing, player])
-
-  useEffect(() => {
-    if (queue.length <= 1 && room?.id && !isGettingAiSuggestion && !aiSuggestion) {
-      getAiSuggestion()
-    } else if (queue.length > 1) {
-      setAiSuggestion(null)
-    }
-  }, [queue.length, room?.id])
 
   const getAiSuggestion = useCallback(async () => {
     if (!room?.id) return
@@ -383,14 +349,14 @@ export default function RoomPage() {
       const currentPlayback = playbackRef.current
       const isIdle = !currentPlayback?.spotify_uri || !currentPlayback.is_playing
       
-      if ((isIdle || startImmediately) && isHost && deviceId) {
+      if ((isIdle || startImmediately) && isHost && deviceIdRef.current) {
         console.log("DEBUG: Triggering Spotify playback for host", track.uri)
         
         // Start Spotify playback
         await fetch('/api/spotify/play', {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ uri: track.uri, deviceId })
+          body: JSON.stringify({ uri: track.uri, deviceId: deviceIdRef.current })
         })
 
         // Update Supabase playback state
@@ -400,34 +366,22 @@ export default function RoomPage() {
           .eq('room_id', room.id)
           .single()
 
+        const playbackData = {
+          room_id: room.id,
+          spotify_uri: track.uri,
+          song_name: track.name,
+          artist_name: track.artist,
+          album_art: track.albumArt,
+          is_playing: true,
+          playback_position: 0,
+          duration_ms: track.durationMs,
+          updated_at: new Date().toISOString()
+        }
+
         if (existing) {
-          await supabase
-            .from('room_playback')
-            .update({
-              spotify_uri: track.uri,
-              song_name: track.name,
-              artist_name: track.artist,
-              album_art: track.albumArt,
-              is_playing: true,
-              playback_position: 0,
-              duration_ms: track.durationMs,
-              updated_at: new Date().toISOString()
-            })
-            .eq('room_id', room.id)
+          await supabase.from('room_playback').update(playbackData).eq('room_id', room.id)
         } else {
-          await supabase
-            .from('room_playback')
-            .insert({
-              room_id: room.id,
-              spotify_uri: track.uri,
-              song_name: track.name,
-              artist_name: track.artist,
-              album_art: track.albumArt,
-              is_playing: true,
-              playback_position: 0,
-              duration_ms: track.durationMs,
-              updated_at: new Date().toISOString()
-            })
+          await supabase.from('room_playback').insert(playbackData)
         }
       }
 
@@ -438,11 +392,10 @@ export default function RoomPage() {
     } catch (error) {
       console.error('Error adding to queue:', error)
     }
-  }, [room?.id, currentUser, code, fetchRoomData, isHost, deviceId])
+  }, [room?.id, currentUser, code, fetchRoomData, isHost])
 
   const addAiSuggestionToQueue = useCallback(async () => {
     if (!aiSuggestion || !room?.id) return
-    console.log('DEBUG: Adding AI suggestion to queue via search...', aiSuggestion)
     setIsSearching(true)
     try {
       const searchQuery = `${aiSuggestion.songName} ${aiSuggestion.artistName}`
@@ -462,28 +415,36 @@ export default function RoomPage() {
   }, [aiSuggestion, room?.id, addToQueue])
 
   const togglePlayback = useCallback(async () => {
-    if (!isHost || !room?.id || !playbackRef.current || !player) return
+    if (!isHost || !room?.id || !playbackRef.current || !deviceIdRef.current) return
     
     const currentPlayback = playbackRef.current
-
-    if (!currentPlayback.spotify_uri && queue.length > 0) {
-      const firstValidSong = queue.find(s => s.spotify_uri && s.spotify_uri !== '')
-      if (firstValidSong) {
-        await addToQueue(firstValidSong, true)
-      }
-      return
-    }
-
-    if (!currentPlayback.spotify_uri) return
-
-    await player.togglePlay()
     const newState = !currentPlayback.is_playing
-    
-    await supabase
-      .from('room_playback')
-      .update({ is_playing: newState, updated_at: new Date().toISOString() })
-      .eq('room_id', room.id)
-  }, [isHost, room?.id, queue, player, addToQueue])
+
+    try {
+      if (newState) {
+        console.log('DEBUG: Host triggering PLAY API', { deviceId: deviceIdRef.current, uri: currentPlayback.spotify_uri })
+        await fetch('/api/spotify/play', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ uri: currentPlayback.spotify_uri, deviceId: deviceIdRef.current })
+        })
+      } else {
+        console.log('DEBUG: Host triggering PAUSE API', { deviceId: deviceIdRef.current })
+        await fetch('/api/spotify/pause', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ deviceId: deviceIdRef.current })
+        })
+      }
+
+      await supabase
+        .from('room_playback')
+        .update({ is_playing: newState, updated_at: new Date().toISOString() })
+        .eq('room_id', room.id)
+    } catch (err) {
+      console.error('DEBUG: Playback toggle failed', err)
+    }
+  }, [isHost, room?.id])
 
   const autoAdvanceWithAiDJ = useCallback(async () => {
     if (!isHost || !room?.id) return
@@ -502,10 +463,8 @@ export default function RoomPage() {
       const tracks = await searchRes.json()
       
       if (tracks && tracks.length > 0) {
-        console.log("DEBUG: NEXT SONG FOUND (AI DJ)", tracks[0])
         await addToQueue(tracks[0], true)
       } else {
-        console.warn("DEBUG: AI DJ failed to find replacement track")
         await supabase.from('room_playback').update({
           spotify_uri: null,
           song_name: null,
@@ -524,50 +483,33 @@ export default function RoomPage() {
 
   const skipToNext = useCallback(async () => {
     if (!isHost || !room?.id) return
-    
-    if (isAdvancingRef.current) {
-      console.log("ADVANCE BLOCKED (Concurrency Guard)")
-      return
-    }
-    
-    isAdvancingRef.current = true
-    console.log("ADVANCE START (skipToNext)", Date.now())
-    
-    try {
-      const currentPlayback = playbackRef.current
-      
-      // 1. Fetch fresh queue first
-      const response = await fetch(`/api/rooms/${code}`)
-      if (!response.ok) throw new Error('Failed to fetch fresh room data')
-      const data = await response.json()
-      const freshQueue = data.queue || []
 
-      // 2. Mark current as played
-      if (currentPlayback?.spotify_uri) {
-        const currentItem = freshQueue.find((s: any) => s.spotify_uri === currentPlayback.spotify_uri && !s.played)
-        if (currentItem) {
-          await fetch(`/api/rooms/${code}`, {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'mark_as_played', songId: currentItem.id })
-          })
-          currentItem.played = true
-        }
+    try {
+      const { data: freshQueue } = await supabase
+        .from('room_queue')
+        .select('*')
+        .eq('room_id', room.id)
+        .eq('played', false)
+        .order('created_at', { ascending: true })
+
+      if (!freshQueue || freshQueue.length === 0) {
+        await supabase.from('room_playback').update({ spotify_uri: null, song_name: null, artist_name: null, album_art: null, is_playing: false, playback_position: 0, duration_ms: 0 }).eq('room_id', room.id)
+        console.log("DEBUG: Queue empty, waiting 5s before AI DJ...")
+        setTimeout(() => autoAdvanceWithAiDJ(), 5000)
+        return
       }
 
-      // 3. Find next song
-      const nextSong = freshQueue.find((s: any) => !s.played && s.spotify_uri)
+      const currentSong = freshQueue[0]
+      await supabase.from('room_queue').update({ played: true }).eq('id', currentSong.id)
 
+      const nextSong = freshQueue[1]
       if (nextSong) {
-        console.log("DEBUG: NEXT SONG FOUND (Skip)", nextSong)
-        
-        if (deviceId) {
-          await fetch('/api/spotify/play', {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ uri: nextSong.spotify_uri, deviceId })
-          })
-        }
+        console.log("DEBUG: PLAYING NEXT SONG", { uri: nextSong.spotify_uri, deviceId: deviceIdRef.current })
+        await fetch('/api/spotify/play', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ uri: nextSong.spotify_uri, deviceId: deviceIdRef.current })
+        })
 
         await supabase
           .from('room_playback')
@@ -582,21 +524,19 @@ export default function RoomPage() {
           })
           .eq('room_id', room.id)
       } else {
-        await autoAdvanceWithAiDJ()
+        await supabase.from('room_playback').update({ spotify_uri: null, song_name: null, artist_name: null, album_art: null, is_playing: false, playback_position: 0, duration_ms: 0 }).eq('room_id', room.id)
+        console.log("DEBUG: No next song, waiting 5s before AI DJ...")
+        setTimeout(() => autoAdvanceWithAiDJ(), 5000)
       }
-      
-      await fetchRoomData()
+      fetchRoomData()
     } catch (err) {
-      console.error("DEBUG: skipToNext failed", err)
-    } finally {
-      isAdvancingRef.current = false
+      console.error('skipToNext failed:', err)
     }
-  }, [isHost, room?.id, code, fetchRoomData, autoAdvanceWithAiDJ, deviceId])
+  }, [isHost, room?.id, supabase, fetchRoomData, autoAdvanceWithAiDJ])
 
   const deleteRoom = async () => {
     if (!isHost || !room?.id) return
     if (!confirm('Are you sure you want to delete this room?')) return
-    
     try {
       const response = await fetch(`/api/rooms/${code}`, { method: 'DELETE' })
       if (response.ok) router.push('/rooms')
@@ -605,10 +545,31 @@ export default function RoomPage() {
     }
   }
 
-  const syncToHost = useCallback(() => {
-    // For Spotify, we don't need manual sync as Supabase state is the source of truth
-    fetchRoomData()
-  }, [fetchRoomData])
+  const syncToHost = useCallback(async () => {
+    if (isHost || !playback) return
+    console.log('DEBUG: Syncing to host...', { uri: playback.spotify_uri, isPlaying: playback.is_playing })
+
+    try {
+      if (playback.spotify_uri) {
+        await fetch('/api/spotify/play', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ uri: playback.spotify_uri, deviceId: 'current' })
+        })
+
+        if (!playback.is_playing) {
+          await fetch('/api/spotify/pause', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ deviceId: 'current' })
+          })
+        }
+      }
+      alert('Synced to Host!')
+    } catch (err) {
+      console.error('DEBUG: Sync failed', err)
+    }
+  }, [isHost, playback])
 
   const playOnMySpotify = async () => {
     if (!playback?.spotify_uri) return
@@ -618,12 +579,8 @@ export default function RoomPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ uri: playback.spotify_uri })
       })
-      if (response.ok) {
-        alert('Added to your Spotify queue!')
-      } else {
-        const error = await response.json()
-        alert(`Failed to add to Spotify: ${error.error}`)
-      }
+      if (response.ok) alert('Added to your Spotify queue!')
+      else alert('Failed to add to Spotify')
     } catch (error) {
       console.error('Error adding to Spotify:', error)
     }
@@ -665,7 +622,6 @@ export default function RoomPage() {
   }
 
   const upcomingQueue = queue.filter(song => !song.played && song.spotify_uri !== playback?.spotify_uri)
-
   const progress = playback?.duration_ms ? (playback.playback_position * 1000 / playback.duration_ms) * 100 : 0
 
   return (
@@ -675,9 +631,7 @@ export default function RoomPage() {
           0% { transform: translateY(0); opacity: 1; }
           100% { transform: translateY(-200px); opacity: 0; }
         }
-        .reaction-float {
-          animation: float 3s ease-out forwards;
-        }
+        .reaction-float { animation: float 3s ease-out forwards; }
       `}</style>
 
       <div className="fixed inset-0 pointer-events-none z-50">
@@ -693,26 +647,18 @@ export default function RoomPage() {
           </h2>
           
           <div className="space-y-4">
-            <div className="aspect-square rounded-2xl overflow-hidden bg-zinc-900 border border-zinc-800 shadow-2xl shadow-purple-500/20 relative group">
+            <div className="aspect-square rounded-2xl overflow-hidden bg-zinc-900 border border-zinc-800 shadow-2xl relative group">
               {playback?.album_art ? (
-                <img 
-                  src={playback.album_art} 
-                  className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-105" 
-                  alt={playback.song_name || ''} 
-                />
+                <img src={playback.album_art} className="w-full h-full object-cover" alt="" />
               ) : (
                 <div className="w-full h-full flex items-center justify-center text-zinc-600 italic p-12 text-center">
-                  {isHost ? 'Select a song from search or AI DJ to start playing' : 'Waiting for host to start playback'}
+                  {isHost ? 'Search a song to start playing' : 'Waiting for host...'}
                 </div>
               )}
-              
-              <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end p-6">
+              <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent flex items-end p-6">
                 <div className="w-full">
-                  <div className="h-1 w-full bg-zinc-800 rounded-full overflow-hidden mb-4">
-                    <div 
-                      className="h-full bg-purple-500 transition-all duration-1000" 
-                      style={{ width: `${progress}%` }}
-                    />
+                  <div className="h-1 w-full bg-zinc-800 rounded-full overflow-hidden mb-2">
+                    <div className="h-full bg-purple-500 transition-all duration-1000" style={{ width: `${progress}%` }} />
                   </div>
                   <div className="flex justify-between text-[10px] font-mono text-zinc-400">
                     <span>{Math.floor((playback?.playback_position || 0) / 60)}:{String((playback?.playback_position || 0) % 60).padStart(2, '0')}</span>
@@ -724,46 +670,37 @@ export default function RoomPage() {
 
             {playback?.song_name && (
               <div className="space-y-1">
-                <h3 className="text-2xl font-black leading-tight tracking-tight">{playback.song_name}</h3>
-                <p className="text-zinc-400 font-medium flex items-center gap-2">
-                  {playback.artist_name}
-                </p>
+                <h3 className="text-2xl font-black">{playback.song_name}</h3>
+                <p className="text-zinc-400">{playback.artist_name}</p>
               </div>
             )}
 
-            {isHost ? (
-              <div className="flex gap-2">
-                <Button onClick={togglePlayback} className="flex-1 bg-white text-black hover:bg-zinc-200 rounded-full py-6 font-bold">
-                  {playback?.is_playing ? <Pause className="mr-2 h-5 w-5 fill-current" /> : <Play className="mr-2 h-5 w-5 fill-current" />}
-                  {playback?.is_playing ? 'Pause' : 'Play'}
-                </Button>
-                <Button variant="outline" onClick={skipToNext} className="border-zinc-800 rounded-full w-14 h-14 p-0">
-                  <SkipForward className="h-5 w-5" />
-                </Button>
-              </div>
-            ) : (
-              <div className="space-y-2">
-                <Button 
-                  onClick={playOnMySpotify} 
-                  className="w-full bg-[#1DB954] hover:bg-[#1ed760] text-black font-bold rounded-full py-6"
-                >
-                  <ExternalLink className="mr-2 h-5 w-5" /> Play on my Spotify
-                </Button>
-                <Button variant="outline" className="w-full border-zinc-800 rounded-full" onClick={syncToHost}>
-                  <RefreshCw className="mr-2 h-4 w-4" /> Sync Room
-                </Button>
-              </div>
-            )}
+            <div className="flex gap-2">
+              {isHost ? (
+                <>
+                  <Button onClick={togglePlayback} className="flex-1 bg-white text-black hover:bg-zinc-200 rounded-full py-6 font-bold">
+                    {playback?.is_playing ? <Pause className="mr-2 h-5 w-5" /> : <Play className="mr-2 h-5 w-5" />}
+                    {playback?.is_playing ? 'Pause' : 'Play'}
+                  </Button>
+                  <Button variant="outline" onClick={skipToNext} className="border-zinc-800 rounded-full w-14 h-14 p-0">
+                    <SkipForward className="h-5 w-5" />
+                  </Button>
+                </>
+              ) : (
+                <>
+                  <Button onClick={syncToHost} className="flex-1 bg-purple-600 hover:bg-purple-700 rounded-full py-6 font-bold">
+                    <RefreshCw className="mr-2 h-5 w-5" /> Sync To Host
+                  </Button>
+                  <Button onClick={playOnMySpotify} variant="outline" className="border-zinc-800 rounded-full px-6">
+                    <ExternalLink className="h-5 w-5" />
+                  </Button>
+                </>
+              )}
+            </div>
 
-            <div className="flex flex-wrap gap-2 pt-4">
+            <div className="flex gap-2 pt-2">
               {['🔥', '😭', '🌊', '💀', '✨'].map(emoji => (
-                <button
-                  key={emoji}
-                  onClick={() => sendReaction(emoji)}
-                  className="w-10 h-10 flex items-center justify-center bg-zinc-900/50 hover:bg-zinc-800 border border-zinc-800/50 rounded-full transition-all hover:scale-110 active:scale-95 text-xl"
-                >
-                  {emoji}
-                </button>
+                <button key={emoji} onClick={() => sendReaction(emoji)} className="w-10 h-10 flex items-center justify-center bg-zinc-900 border border-zinc-800 rounded-full transition-transform hover:scale-110 active:scale-95 text-xl">{emoji}</button>
               ))}
             </div>
           </div>
@@ -772,11 +709,11 @@ export default function RoomPage() {
         <div className="lg:col-span-5 space-y-6">
           <div className="relative">
             <form onSubmit={handleSearch} className="relative">
-              <Search className="absolute left-4 top-1/2 -translate-y-1/2 h-5 w-5 text-zinc-500" />
+              <Search className="absolute left-4 top-1/2 -translate-y-1/2 h-5 w-5 text-zinc-400" />
               <input
                 type="text"
                 placeholder="Search Spotify tracks..."
-                className="w-full bg-zinc-900/50 border border-zinc-800 rounded-2xl py-4 pl-12 pr-4 focus:outline-none focus:ring-2 focus:ring-purple-500/50 transition-all font-medium"
+                className="w-full bg-zinc-900 border border-zinc-800 rounded-2xl py-4 pl-12 pr-4 focus:ring-2 focus:ring-purple-500/50 outline-none"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
               />
@@ -784,21 +721,13 @@ export default function RoomPage() {
             </form>
 
             {searchResults.length > 0 && (
-              <div className="absolute top-full mt-2 w-full bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden z-20 shadow-2xl backdrop-blur-xl">
+              <div className="absolute top-full mt-2 w-full bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden z-20 shadow-2xl">
                 {searchResults.map((track) => (
-                  <button
-                    key={track.id}
-                    onClick={() => addToQueue(track)}
-                    className="w-full p-4 flex items-center gap-4 hover:bg-white/5 transition-colors text-left border-b border-zinc-800/50 last:border-0"
-                  >
-                    <img src={track.albumArt} className="w-12 h-12 rounded shadow-lg" alt="" />
+                  <button key={track.id} onClick={() => addToQueue(track)} className="w-full p-4 flex items-center gap-4 hover:bg-zinc-800 transition-colors text-left border-b border-zinc-800/50 last:border-0">
+                    <img src={track.albumArt} className="w-12 h-12 rounded" alt="" />
                     <div className="flex-1 min-w-0">
                       <div className="font-bold truncate">{track.name}</div>
                       <div className="text-sm text-zinc-400 truncate">{track.artist}</div>
-                    </div>
-                    <div className="flex items-center gap-2 text-zinc-500 text-xs font-mono">
-                      <Clock className="h-3 w-3" />
-                      {Math.floor(track.durationMs / 60000)}:{String(Math.floor((track.durationMs % 60000) / 1000)).padStart(2, '0')}
                     </div>
                     <Plus className="h-5 w-5 text-purple-500" />
                   </button>
@@ -808,55 +737,35 @@ export default function RoomPage() {
           </div>
 
           <div className="space-y-4">
-            <h2 className="text-xl font-bold font-heading">Upcoming Queue</h2>
+            <h2 className="text-xl font-bold">Upcoming Queue</h2>
             <div className="space-y-2 max-h-[500px] overflow-y-auto pr-2 custom-scrollbar">
               {upcomingQueue.map((song) => (
-                <div key={song.id} className="flex items-center gap-4 p-3 bg-zinc-900/50 border border-zinc-800/50 rounded-xl group hover:border-zinc-700 transition-all">
+                <div key={song.id} className="flex items-center gap-4 p-3 bg-zinc-900/50 border border-zinc-800 rounded-xl group hover:border-zinc-700 transition-all">
                   <img src={song.album_art} className="w-12 h-12 rounded-lg object-cover" alt="" />
                   <div className="flex-1 min-w-0">
                     <div className="font-medium truncate">{song.song_name}</div>
                     <div className="text-sm text-zinc-500 truncate">{song.artist_name}</div>
                   </div>
                   <div className="flex items-center gap-2">
-                    <span className="text-[10px] font-mono text-zinc-600">
-                      {song.votes_to_skip?.length || 0}/{Math.ceil(members.length * 0.5)}
-                    </span>
-                    <Button 
-                      variant="ghost" 
-                      size="icon" 
-                      className="h-8 w-8 rounded-full hover:bg-white/10"
-                      onClick={() => voteSkip(song.id, song.votes_to_skip || [])}
-                    >
-                      <SkipForward className="h-4 w-4" />
-                    </Button>
+                    <span className="text-[10px] font-mono text-zinc-600">{song.votes_to_skip?.length || 0}/{Math.ceil(members.length * 0.5)}</span>
+                    <Button variant="ghost" size="icon" className="h-8 w-8 rounded-full" onClick={() => voteSkip(song.id, song.votes_to_skip || [])}><SkipForward className="h-4 w-4" /></Button>
                   </div>
                 </div>
               ))}
-              {upcomingQueue.length === 0 && (
-                <div className="py-12 text-center text-zinc-600 border border-dashed border-zinc-800 rounded-xl">
-                  Queue is empty
-                </div>
-              )}
+              {upcomingQueue.length === 0 && <div className="py-12 text-center text-zinc-600 border border-dashed border-zinc-800 rounded-xl">Queue is empty</div>}
             </div>
           </div>
 
           {upcomingQueue.length === 0 && aiSuggestion && (
-            <div className="bg-gradient-to-br from-purple-900/20 to-zinc-900 border border-purple-500/20 rounded-2xl p-6 space-y-4">
-              <div className="flex items-center gap-2 text-purple-400 font-bold">
-                <Sparkles className="h-5 w-5" /> AI DJ Suggestion
-              </div>
+            <div className="bg-purple-900/10 border border-purple-500/20 rounded-2xl p-6 space-y-4">
+              <div className="flex items-center gap-2 text-purple-400 font-bold"><Sparkles className="h-5 w-5" /> AI DJ Suggestion</div>
               <div className="flex items-center gap-4">
                 <div className="flex-1">
                   <h3 className="text-lg font-bold">{aiSuggestion.songName}</h3>
                   <p className="text-zinc-400">{aiSuggestion.artistName}</p>
                   <p className="text-xs text-zinc-500 mt-2 italic">"{aiSuggestion.reason}"</p>
                 </div>
-                <Button 
-                  onClick={addAiSuggestionToQueue}
-                  className="bg-purple-600 hover:bg-purple-700"
-                >
-                  Add to Queue
-                </Button>
+                <Button onClick={addAiSuggestionToQueue} className="bg-purple-600">Add</Button>
               </div>
             </div>
           )}
@@ -864,45 +773,18 @@ export default function RoomPage() {
 
         <div className="lg:col-span-3 space-y-8">
           <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 space-y-6">
-            <div>
-              <h1 className="text-2xl font-bold font-heading text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-pink-400">{room?.name}</h1>
-              <p className="text-zinc-500 text-sm mt-1 uppercase tracking-wider">{room?.genre}</p>
+            <h1 className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-purple-400 to-pink-400 truncate">{room?.name}</h1>
+            <div className="space-y-4 text-sm">
+              <div className="flex justify-between items-center"><span className="text-zinc-400">Code</span><button onClick={copyCode} className="text-purple-400 flex items-center gap-1 font-bold font-mono">{code} <Copy className="h-3 w-3" /></button></div>
+              <Button variant="destructive" className="w-full" onClick={() => router.push('/rooms')}>Leave Room</Button>
             </div>
-
             <div className="space-y-4">
-              <div className="flex items-center justify-between text-sm">
-                <span className="text-zinc-400">Room Code</span>
-                <button onClick={copyCode} className="flex items-center gap-1.5 text-purple-400 hover:text-purple-300 transition-colors">
-                  <span className="font-mono font-bold">{code}</span>
-                  <Copy className="h-3.5 w-3.5" />
-                </button>
-              </div>
-              <Button variant="destructive" className="w-full bg-red-500/10 hover:bg-red-500 text-red-500 hover:text-white border border-red-500/20" onClick={() => router.push('/rooms')}>
-                <LogOut className="mr-2 h-4 w-4" /> Leave Room
-              </Button>
-              {isHost && (
-                <Button variant="destructive" className="w-full mt-2" onClick={deleteRoom}>Delete Room</Button>
-              )}
-            </div>
-
-            <div className="space-y-4">
-              <h3 className="text-sm font-bold uppercase tracking-widest text-zinc-500 flex items-center gap-2">
-                <Users className="h-4 w-4" /> Members ({members.length})
-              </h3>
-              <div className="space-y-2 max-h-[300px] overflow-y-auto pr-2 custom-scrollbar">
-                {members.map((member) => (
-                  <div key={member.id} className="flex items-center gap-3">
-                    <div className="w-8 h-8 rounded-full bg-gradient-to-br from-zinc-700 to-zinc-800 flex items-center justify-center text-xs font-bold border border-zinc-700">
-                      {member.user_id.substring(0, 2).toUpperCase()}
-                    </div>
-                    <div className="flex flex-col">
-                      <span className="text-sm text-zinc-300 truncate">
-                        {member.user_id === currentUser?.id ? 'You' : `User ${member.user_id.substring(0, 5)}...`}
-                      </span>
-                      {member.user_id === room?.host_id && (
-                        <span className="text-[10px] text-purple-500 font-bold uppercase tracking-tighter">Host</span>
-                      )}
-                    </div>
+              <h3 className="text-xs font-bold text-zinc-500 uppercase tracking-widest flex items-center gap-2"><Users className="h-4 w-4" /> Members ({members.length})</h3>
+              <div className="space-y-2 max-h-[300px] overflow-y-auto custom-scrollbar">
+                {members.map(m => (
+                  <div key={m.id} className="flex items-center gap-3">
+                    <div className="w-8 h-8 rounded-full bg-zinc-800 flex items-center justify-center text-xs font-bold">{m.user_id.substring(0,2).toUpperCase()}</div>
+                    <span className="text-sm text-zinc-300 truncate">{m.user_id === currentUser?.id ? 'You' : `User ${m.user_id.substring(0,4)}`}</span>
                   </div>
                 ))}
               </div>
