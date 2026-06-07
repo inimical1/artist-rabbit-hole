@@ -546,28 +546,27 @@ export default function RoomPage() {
   }
 
   const syncToHost = useCallback(async () => {
-    if (isHost || !playback) return
-    console.log('DEBUG: Syncing to host...', { uri: playback.spotify_uri, isPlaying: playback.is_playing })
+    if (isHost || !playback?.spotify_uri) return
+    console.log('DEBUG: Syncing to host via queue...', { uri: playback.spotify_uri })
 
     try {
-      if (playback.spotify_uri) {
-        await fetch('/api/spotify/play', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ uri: playback.spotify_uri, deviceId: 'current' })
-        })
-
-        if (!playback.is_playing) {
-          await fetch('/api/spotify/pause', {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ deviceId: 'current' })
-          })
-        }
+      const response = await fetch('/api/spotify/queue', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ uri: playback.spotify_uri })
+      })
+      
+      const data = await response.json()
+      
+      if (!response.ok) {
+        alert(`Failed to sync: ${data.error || 'Unknown error'}`)
+        return
       }
-      alert('Synced to Host!')
+      
+      alert('Added to your Spotify queue! Press next on Spotify to hear it.')
     } catch (err) {
-      console.error('DEBUG: Sync failed', err)
+      console.error('Sync failed:', err)
+      alert('Failed to sync to host')
     }
   }, [isHost, playback])
 
