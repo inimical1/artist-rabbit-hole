@@ -23,9 +23,12 @@ export async function POST(request: Request) {
       }
     })
 
+    const text = await response.text()
+    console.log("SPOTIFY RAW RESPONSE (queue):", text)
+
     if (!response.ok) {
-      const errorData = await response.json()
-      return NextResponse.json({ error: errorData.error.message }, { status: response.status })
+      console.error('DEBUG: Spotify Queue API Error:', response.status, text)
+      return NextResponse.json({ error: text, status: response.status }, { status: response.status })
     }
 
     return NextResponse.json({ success: true })

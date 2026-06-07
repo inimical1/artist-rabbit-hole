@@ -15,7 +15,17 @@ export async function GET() {
       },
     })
 
-    const data = await response.json()
+    const text = await response.text()
+    console.log("SPOTIFY RAW RESPONSE (top tracks):", text)
+
+    if (!response.ok) {
+      return NextResponse.json(
+        { error: text, status: response.status },
+        { status: response.status }
+      )
+    }
+
+    const data = JSON.parse(text)
 
     if (data.error) {
       return NextResponse.json({ error: data.error.message }, { status: data.error.status })

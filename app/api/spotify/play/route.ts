@@ -35,9 +35,9 @@ export async function PUT(request: Request) {
       })
 
       if (!response.ok) {
-        const errorData = await response.json()
-        console.error('DEBUG: Spotify Transfer Error:', errorData)
-        return NextResponse.json({ error: errorData.error.message }, { status: response.status })
+        const errorText = await response.text()
+        console.error('DEBUG: Spotify Transfer Error:', response.status, errorText)
+        return NextResponse.json({ error: errorText, status: response.status }, { status: response.status })
       }
 
       console.log('DEBUG: Spotify Transfer Success')
@@ -60,9 +60,9 @@ export async function PUT(request: Request) {
     })
 
     if (!response.ok) {
-      const errorData = await response.json()
-      console.error('DEBUG: Spotify Play API Error:', errorData)
-      return NextResponse.json({ error: errorData.error.message }, { status: response.status })
+      const errorText = await response.text()
+      console.error('DEBUG: Spotify Play API Error:', response.status, errorText)
+      return NextResponse.json({ error: errorText, status: response.status }, { status: response.status })
     }
 
     console.log('DEBUG: Spotify Play API Success')

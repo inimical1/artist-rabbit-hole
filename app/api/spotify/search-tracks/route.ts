@@ -21,14 +21,16 @@ export async function GET(request: Request) {
         'Authorization': `Bearer ${token}`
       }
     })
+const text = await response.text()
+console.log("SPOTIFY RAW RESPONSE (search-tracks):", text)
 
-    if (!response.ok) {
-      const errorData = await response.json()
-      return NextResponse.json({ error: errorData.error.message }, { status: response.status })
-    }
+if (!response.ok) {
+  return NextResponse.json({ error: text, status: response.status }, { status: response.status })
+}
 
-    const data = await response.json()
-    const tracks = data.tracks.items.map((track: any) => ({
+const data = JSON.parse(text)
+const tracks = data.tracks.items.map((track: any) => ({
+...
       id: track.id,
       name: track.name,
       artist: track.artists.map((a: any) => a.name).join(', '),

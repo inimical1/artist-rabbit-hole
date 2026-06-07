@@ -28,7 +28,15 @@ async function refreshSpotifyToken(refreshToken: string) {
       }),
     })
 
-    const tokens = await response.json()
+    const text = await response.text()
+    console.log("SPOTIFY RAW RESPONSE (token refresh):", text)
+
+    if (!response.ok) {
+      console.error('Spotify token refresh error status:', response.status)
+      return null
+    }
+
+    const tokens = JSON.parse(text)
 
     if (tokens.error) {
       console.error('Spotify token refresh error:', tokens.error)
@@ -61,7 +69,15 @@ export async function getSpotifyArtistImage(name: string): Promise<string | null
       },
     })
 
-    const data = await response.json()
+    const text = await response.text()
+    console.log("SPOTIFY RAW RESPONSE (artist image):", text)
+
+    if (!response.ok) {
+      console.error('Spotify artist image error status:', response.status)
+      return null
+    }
+
+    const data = JSON.parse(text)
     if (data.error || !data.artists?.items?.length) return null
 
     return data.artists.items[0].images[0]?.url || null

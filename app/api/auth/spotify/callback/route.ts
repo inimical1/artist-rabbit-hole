@@ -24,7 +24,15 @@ export async function GET(request: Request) {
       }),
     })
 
-    const tokens = await tokenResponse.json()
+    const text = await tokenResponse.text()
+    console.log("SPOTIFY RAW RESPONSE (token exchange):", text)
+
+    if (!tokenResponse.ok) {
+      console.error('Spotify token exchange error status:', tokenResponse.status)
+      return NextResponse.redirect(new URL('/', request.url))
+    }
+
+    const tokens = JSON.parse(text)
 
     if (tokens.error) {
       console.error('Spotify token exchange error:', tokens.error)

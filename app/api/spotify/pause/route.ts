@@ -23,10 +23,12 @@ export async function PUT(request: Request) {
       }
     })
 
+    const text = await response.text()
+    console.log("SPOTIFY RAW RESPONSE (pause):", text)
+
     if (!response.ok) {
-      const errorData = await response.json()
-      console.error('DEBUG: Spotify Pause API Error:', errorData)
-      return NextResponse.json({ error: errorData.error.message }, { status: response.status })
+      console.error('DEBUG: Spotify Pause API Error:', response.status, text)
+      return NextResponse.json({ error: text, status: response.status }, { status: response.status })
     }
 
     console.log('DEBUG: Spotify Pause API Success')

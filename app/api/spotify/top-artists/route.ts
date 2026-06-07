@@ -15,10 +15,13 @@ export async function GET() {
       headers: { Authorization: `Bearer ${accessToken}` }
     })
     if (meRes.ok) {
-      const meData = await meRes.json()
+      const meText = await meRes.text()
+      console.log("SPOTIFY RAW RESPONSE (me):", meText)
+      const meData = JSON.parse(meText)
       console.log("DEBUG: SPOTIFY USER:", { email: meData.email, id: meData.id })
     } else {
-      console.log("DEBUG: FAILED TO FETCH USER INFO", meRes.status)
+      const meErrorText = await meRes.text()
+      console.log("DEBUG: FAILED TO FETCH USER INFO", meRes.status, meErrorText)
     }
 
     const endpoint = 'https://api.spotify.com/v1/me/top/artists?limit=10&time_range=medium_term'
