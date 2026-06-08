@@ -1,6 +1,7 @@
 import { createClient } from '@supabase/supabase-js'
 import { NextResponse } from 'next/server'
 import Groq from 'groq-sdk'
+import { redis } from '@/lib/redis'
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -15,6 +16,13 @@ export async function POST(request: Request) {
 
     if (!roomId) {
       return NextResponse.json({ error: 'Room ID is required' }, { status: 400 })
+    }
+
+    const rateLimitKey = `ratelimit:aidj:${roomId}`
+    const requests = await redis.incr(rateLimitKey)
+    if (requests === 1) await redis.expire(rateLimitKey, 3600)
+    if (requests > 10) {
+      return NextResponse.json({ error: 'AI DJ rate limit reached' }, { status: 429 })
     }
 
     // Fetch room genre for fallback

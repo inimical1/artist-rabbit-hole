@@ -1,3 +1,5 @@
+import { redis } from '@/lib/redis'
+
 export const revalidate = 3600
 
 type LastFmTrack = {
@@ -25,6 +27,10 @@ type TrendingTrack = {
 }
 
 export async function GET() {
+  const cacheKey = 'trending:lastfm'
+  const cached = await redis.get<TrendingTrack[]>(cacheKey)
+  if (cached) return Response.json(cached)
+
   if (!process.env.LASTFM_API_KEY) {
     return Response.json({ error: 'Last.fm API key is not configured' }, { status: 500 })
   }
@@ -54,6 +60,7 @@ export async function GET() {
       url: track.url || '',
     }))
 
+    await redis.setex(cacheKey, 3600, tracks)
     return Response.json(tracks)
   } catch (error) {
     console.error('Last.fm trending lookup failed:', error)

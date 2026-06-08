@@ -2,6 +2,7 @@ import Groq from 'groq-sdk'
 import { Vibrant } from 'node-vibrant/node'
 import { type ArtistData } from '@/components/artist-result'
 import { getSpotifyArtistImage } from '@/lib/spotify'
+import { redis } from '@/lib/redis'
 
 const MUSICBRAINZ_USER_AGENT = 'ArtistRabbitHole/1.0'
 const GROQ_MODEL = 'llama-3.3-70b-versatile'
@@ -357,6 +358,25 @@ export async function GET(request: Request) {
     return Response.json({ error: 'Artist name is required' }, { status: 400 })
   }
 
+  // Rate limiting
+  const ip = request.headers.get('x-forwarded-for') || 'unknown'
+  const rateLimitKey = `ratelimit:artist:${ip}`
+  const requests = await redis.incr(rateLimitKey)
+  if (requests === 1) {
+    await redis.expire(rateLimitKey, 3600)
+  }
+  if (requests > 20) {
+    return Response.json({ error: 'Rate limit exceeded. Try again later.' }, { status: 429 })
+  }
+
+  // Caching
+  const cacheKey = `artist:${requestedName.toLowerCase()}`
+  const cached = await redis.get<ArtistData>(cacheKey)
+  if (cached) {
+    console.log('Cache hit for artist:', requestedName)
+    return Response.json(cached)
+  }
+
   const { artist, artistWithRelations } = await getMusicBrainzArtist(requestedName)
   const name = artist?.name || requestedName
   const genres = getGenres(artist)
@@ -402,5 +422,6 @@ export async function GET(request: Request) {
     accentColor,
   }
 
+  await redis.setex(cacheKey, 86400, artistData)
   return Response.json(artistData)
 }
