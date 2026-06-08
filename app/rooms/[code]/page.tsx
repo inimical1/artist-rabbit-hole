@@ -1,15 +1,14 @@
 'use client'
 
-import { useState, useEffect, useCallback, useRef, useMemo, memo } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { Button } from '@/components/ui/button'
-import { initSpotifyPlayer } from '@/lib/spotify-player'
+import YouTube, { YouTubePlayer } from 'react-youtube'
 import { 
   Music, 
   Users, 
   Copy, 
-  LogOut, 
   Search, 
   Plus, 
   SkipForward, 
@@ -17,8 +16,6 @@ import {
   Loader2,
   Play,
   Pause,
-  RefreshCw,
-  Clock,
   ExternalLink
 } from 'lucide-react'
 
@@ -81,81 +78,25 @@ export default function RoomPage() {
   const [isSearching, setIsSearching] = useState(false)
   const [reactions, setReactions] = useState<Reaction[]>([])
   const [aiSuggestion, setAiSuggestion] = useState<any>(null)
-  const [isGettingAiSuggestion, setIsGettingAiSuggestion] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
   
   const [playback, setPlayback] = useState<RoomPlayback | null>(null)
-  const [spotifyToken, setSpotifyToken] = useState<string | null>(null)
-  const [deviceId, setDeviceId] = useState<string | null>(null)
-  const deviceIdRef = useRef<string | null>(null)
-  const [player, setPlayer] = useState<any>(null)
+  const [player, setPlayer] = useState<YouTubePlayer | null>(null)
+  const [isPlayerReady, setIsPlayerReady] = useState(false)
+  
   const playbackRef = useRef<RoomPlayback | null>(null)
+  const failedVideoIdsRef = useRef<Set<string>>(new Set())
   const isAdvancingRef = useRef(false)
+  const aiDjCooldownRef = useRef(0)
 
   const isHost = currentUser?.id && room?.host_id && currentUser.id === room.host_id
 
-  // Fetch Spotify token on mount
-  useEffect(() => {
-    const fetchToken = async () => {
-      const res = await fetch('/api/spotify/token')
-      const data = await res.json()
-      console.log("DEBUG: SPOTIFY TOKEN LOADED", { hasToken: !!data.token, isProduction: process.env.NODE_ENV === 'production' })
-      setSpotifyToken(data.token)
-    }
-    fetchToken()
-  }, [])
-
-  // Initialize Spotify Player for Host
-  useEffect(() => {
-    if (isHost && spotifyToken && !player) {
-      console.log('DEBUG: SPOTIFY PLAYER INITIALIZING', { isProduction: process.env.NODE_ENV === 'production' })
-      const spotifyPlayer = initSpotifyPlayer(
-        spotifyToken,
-        async (id) => {
-          console.log('DEBUG: SPOTIFY PLAYER READY', { deviceId: id })
-          setDeviceId(id)
-          deviceIdRef.current = id
-
-          // Force transfer to browser
-          console.log('DEBUG: Transferring playback to browser SDK...')
-          await fetch('/api/spotify/play', {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ deviceId: id, transferOnly: true })
-          })
-        },
-        async (state) => {
-          if (!state) return
-          // Monitoring logic can go here
-        }
-      )
-      setPlayer(spotifyPlayer)
-    }
-  }, [isHost, spotifyToken, player])
-
-  // Cleanup effect
-  useEffect(() => {
-    return () => {
-      if (player) {
-        player.disconnect()
-      }
-    }
-  }, [player])
-
-  // Update ref whenever playback changes to keep handlers stable
   useEffect(() => {
     playbackRef.current = playback
   }, [playback])
 
-  useEffect(() => {
-    if (currentUser && room) {
-      console.log('DEBUG: Auth check', { userId: currentUser.id, hostId: room.host_id, isHost })
-    }
-  }, [currentUser, room, isHost])
-
   const fetchRoomData = useCallback(async () => {
     try {
-      console.log('DEBUG: Fetching room data...')
       const response = await fetch(`/api/rooms/${code}`)
       if (!response.ok) throw new Error('Room not found')
       const data = await response.json()
@@ -206,8 +147,6 @@ export default function RoomPage() {
     if (!currentUser || !room?.id) return
 
     const setupSubscriptions = () => {
-      console.log('DEBUG: Setting up Supabase Realtime subscriptions...')
-      
       const queueChannel = supabase.channel(`room_queue:${room.id}`)
         .on('postgres_changes', { event: '*', schema: 'public', table: 'room_queue', filter: `room_id=eq.${room.id}` }, () => {
           fetchRoomData()
@@ -223,6 +162,7 @@ export default function RoomPage() {
       const playbackChannel = supabase.channel(`room_playback:${room.id}`)
         .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'room_playback', filter: `room_id=eq.${room.id}` }, (payload) => {
           const newPlayback = payload.new as any
+          console.log("REALTIME PLAYBACK UPDATE", newPlayback)
           setPlayback(newPlayback as RoomPlayback)
         })
         .subscribe()
@@ -265,55 +205,40 @@ export default function RoomPage() {
     }
   }, [currentUser, room?.id, fetchRoomData, isHost])
 
-  // Host broadcast logic
+  // Host broadcast logic for YouTube position
   useEffect(() => {
-    if (!isHost || !room?.id || !playback?.is_playing || !player) return
+    if (!isHost || !room?.id || !playback?.is_playing || !player || !isPlayerReady) return
 
     const interval = setInterval(async () => {
-      const state = await player.getCurrentState()
-      if (state) {
-        await supabase
-          .from('room_playback')
-          .update({ 
-            playback_position: Math.floor(state.position / 1000), 
-            duration_ms: state.duration,
-            updated_at: new Date().toISOString() 
-          })
-          .eq('room_id', room.id)
+      try {
+        const state = await player.getPlayerState()
+        if (state === 1) { // PLAYING
+          const position = await player.getCurrentTime()
+          const duration = await player.getDuration()
+          
+          await supabase
+            .from('room_playback')
+            .update({ 
+              playback_position: Math.floor(position), 
+              duration_ms: Math.floor(duration * 1000),
+              updated_at: new Date().toISOString() 
+            })
+            .eq('room_id', room.id)
+        }
+      } catch (err) {
+        console.error('Error broadcasting state', err)
       }
     }, 3000)
 
     return () => clearInterval(interval)
-  }, [isHost, room?.id, playback?.is_playing, player])
-
-  const getAiSuggestion = useCallback(async () => {
-    if (!room?.id) return
-    console.log('DEBUG: Getting AI suggestion...')
-    setIsGettingAiSuggestion(true)
-    try {
-      const response = await fetch('/api/rooms/ai-dj', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ roomId: room.id })
-      })
-      const data = await response.json()
-      if (!data.error) {
-        console.log('DEBUG: AI Suggestion received:', data)
-        setAiSuggestion(data)
-      }
-    } catch (error) {
-      console.error('AI DJ Error:', error)
-    } finally {
-      setIsGettingAiSuggestion(false)
-    }
-  }, [room?.id])
+  }, [isHost, room?.id, playback?.is_playing, player, isPlayerReady])
 
   const handleSearch = useCallback(async (e: React.FormEvent) => {
     e.preventDefault()
     if (!searchQuery.trim()) return
     setIsSearching(true)
     try {
-      const response = await fetch(`/api/spotify/search-tracks?q=${encodeURIComponent(searchQuery)}`)
+      const response = await fetch(`/api/rooms/youtube-search?q=${encodeURIComponent(searchQuery)}`)
       const data = await response.json()
       setSearchResults(data)
     } catch (error) {
@@ -329,7 +254,6 @@ export default function RoomPage() {
     try {
       const { data: { session } } = await supabase.auth.getSession()
       
-      console.log("DEBUG: Adding to queue", { title: track.name, uri: track.uri })
       const response = await fetch(`/api/rooms/${code}/queue`, {
         method: 'POST',
         headers: { 
@@ -337,29 +261,20 @@ export default function RoomPage() {
           'Authorization': `Bearer ${session?.access_token}`
         },
         body: JSON.stringify({
-          songName: track.name,
-          artistName: track.artist,
-          spotifyUri: track.uri,
-          thumbnail: track.albumArt
+          songName: track.title,
+          artistName: track.channelName,
+          youtubeVideoId: track.videoId,
+          thumbnail: track.thumbnail
         })
       })
       
       if (!response.ok) throw new Error('Failed to add to queue')
 
       const currentPlayback = playbackRef.current
-      const isIdle = !currentPlayback?.spotify_uri || !currentPlayback.is_playing
+      const isIdle = !currentPlayback?.youtube_video_id || !currentPlayback.is_playing
       
-      if ((isIdle || startImmediately) && isHost && deviceIdRef.current) {
-        console.log("DEBUG: Triggering Spotify playback for host", track.uri)
-        
-        // Start Spotify playback
-        await fetch('/api/spotify/play', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ uri: track.uri, deviceId: deviceIdRef.current })
-        })
-
-        // Update Supabase playback state
+      if ((isIdle || startImmediately) && isHost) {
+        // Start YouTube playback
         const { data: existing } = await supabase
           .from('room_playback')
           .select('id')
@@ -368,13 +283,13 @@ export default function RoomPage() {
 
         const playbackData = {
           room_id: room.id,
-          spotify_uri: track.uri,
-          song_name: track.name,
-          artist_name: track.artist,
-          album_art: track.albumArt,
+          youtube_video_id: track.videoId,
+          song_name: track.title,
+          artist_name: track.channelName,
+          album_art: track.thumbnail,
           is_playing: true,
           playback_position: 0,
-          duration_ms: track.durationMs,
+          duration_ms: 0, // updated later
           updated_at: new Date().toISOString()
         }
 
@@ -394,60 +309,15 @@ export default function RoomPage() {
     }
   }, [room?.id, currentUser, code, fetchRoomData, isHost])
 
-  const addAiSuggestionToQueue = useCallback(async () => {
-    if (!aiSuggestion || !room?.id) return
-    setIsSearching(true)
-    try {
-      const searchQuery = `${aiSuggestion.songName} ${aiSuggestion.artistName}`
-      const searchRes = await fetch(`/api/spotify/search-tracks?q=${encodeURIComponent(searchQuery)}`)
-      const tracks = await searchRes.json()
-      
-      if (tracks && tracks.length > 0) {
-        await addToQueue(tracks[0], true)
-      } else {
-        alert('Could not find a Spotify track for this suggestion.')
-      }
-    } catch (error) {
-      console.error('Error adding AI suggestion:', error)
-    } finally {
-      setIsSearching(false)
-    }
-  }, [aiSuggestion, room?.id, addToQueue])
-
-  const togglePlayback = useCallback(async () => {
-    if (!isHost || !room?.id || !playbackRef.current || !deviceIdRef.current) return
-    
-    const currentPlayback = playbackRef.current
-    const newState = !currentPlayback.is_playing
-
-    try {
-      if (newState) {
-        console.log('DEBUG: Host triggering PLAY API', { deviceId: deviceIdRef.current, uri: currentPlayback.spotify_uri })
-        await fetch('/api/spotify/play', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ uri: currentPlayback.spotify_uri, deviceId: deviceIdRef.current })
-        })
-      } else {
-        console.log('DEBUG: Host triggering PAUSE API', { deviceId: deviceIdRef.current })
-        await fetch('/api/spotify/pause', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ deviceId: deviceIdRef.current })
-        })
-      }
-
-      await supabase
-        .from('room_playback')
-        .update({ is_playing: newState, updated_at: new Date().toISOString() })
-        .eq('room_id', room.id)
-    } catch (err) {
-      console.error('DEBUG: Playback toggle failed', err)
-    }
-  }, [isHost, room?.id])
-
   const autoAdvanceWithAiDJ = useCallback(async () => {
-    if (!isHost || !room?.id) return
+    if (!isHost || !room?.id || isAdvancingRef.current) return
+    
+    const now = Date.now()
+    if (now < aiDjCooldownRef.current) {
+      console.log("AI DJ cooldown active")
+      return
+    }
+
     console.log('DEBUG: Queue empty, triggering auto-advance with AI DJ...')
     try {
       const suggestionRes = await fetch('/api/rooms/ai-dj', {
@@ -459,14 +329,16 @@ export default function RoomPage() {
       if (suggestion.error) throw new Error(suggestion.error)
 
       const searchQuery = `${suggestion.songName} ${suggestion.artistName}`
-      const searchRes = await fetch(`/api/spotify/search-tracks?q=${encodeURIComponent(searchQuery)}`)
+      const searchRes = await fetch(`/api/rooms/youtube-search?q=${encodeURIComponent(searchQuery)}`)
       const tracks = await searchRes.json()
       
       if (tracks && tracks.length > 0) {
         await addToQueue(tracks[0], true)
       } else {
+        console.log("No playable candidates found for AI suggestion, starting 60s cooldown")
+        aiDjCooldownRef.current = Date.now() + 60000
         await supabase.from('room_playback').update({
-          spotify_uri: null,
+          youtube_video_id: null,
           song_name: null,
           artist_name: null,
           album_art: null,
@@ -478,11 +350,18 @@ export default function RoomPage() {
       }
     } catch (error) {
       console.error('DEBUG: autoAdvanceWithAiDJ failed:', error)
+      aiDjCooldownRef.current = Date.now() + 60000
     }
   }, [isHost, room?.id, addToQueue])
 
   const skipToNext = useCallback(async () => {
-    if (!isHost || !room?.id) return
+    if (!isHost || !room?.id || isAdvancingRef.current) {
+      console.log("ADVANCING (skipToNext locked or not host)", isAdvancingRef.current)
+      return
+    }
+    isAdvancingRef.current = true
+    console.log("SKIP START")
+    console.log("CURRENT PLAYBACK", playbackRef.current?.youtube_video_id)
 
     try {
       const { data: freshQueue } = await supabase
@@ -492,29 +371,48 @@ export default function RoomPage() {
         .eq('played', false)
         .order('created_at', { ascending: true })
 
-      if (!freshQueue || freshQueue.length === 0) {
-        await supabase.from('room_playback').update({ spotify_uri: null, song_name: null, artist_name: null, album_art: null, is_playing: false, playback_position: 0, duration_ms: 0 }).eq('room_id', room.id)
-        console.log("DEBUG: Queue empty, waiting 5s before AI DJ...")
-        setTimeout(() => autoAdvanceWithAiDJ(), 5000)
+      if (!freshQueue) throw new Error("Could not fetch queue")
+      
+      console.log("QUEUE", freshQueue.map(s => ({
+        id: s.youtube_video_id,
+        played: s.played
+      })))
+
+      if (freshQueue.length === 0) {
+        await supabase.from('room_playback').update({ youtube_video_id: null, song_name: null, artist_name: null, album_art: null, is_playing: false, playback_position: 0, duration_ms: 0 }).eq('room_id', room.id)
+        setTimeout(() => {
+          isAdvancingRef.current = false
+          autoAdvanceWithAiDJ()
+        }, 3000)
         return
       }
 
+      // Mark the current playing/failed one as played
       const currentSong = freshQueue[0]
       await supabase.from('room_queue').update({ played: true }).eq('id', currentSong.id)
 
-      const nextSong = freshQueue[1]
-      if (nextSong) {
-        console.log("DEBUG: PLAYING NEXT SONG", { uri: nextSong.spotify_uri, deviceId: deviceIdRef.current })
-        await fetch('/api/spotify/play', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ uri: nextSong.spotify_uri, deviceId: deviceIdRef.current })
-        })
+      // Find the next VALID song not in the blacklist
+      let nextSong = null
+      let currentIndex = 1
+      while (currentIndex < freshQueue.length) {
+        const candidate = freshQueue[currentIndex]
+        if (candidate.youtube_video_id && !failedVideoIdsRef.current.has(candidate.youtube_video_id)) {
+          nextSong = candidate
+          break
+        }
+        console.log("BLACKLIST (skipping blacklisted video)", candidate.youtube_video_id)
+        // Mark failed ones in queue as played so we don't try them again
+        await supabase.from('room_queue').update({ played: true }).eq('id', candidate.id)
+        currentIndex++
+      }
 
-        await supabase
+      console.log("NEXT SONG CHOSEN", nextSong)
+
+      if (nextSong) {
+        const result = await supabase
           .from('room_playback')
           .update({
-            spotify_uri: nextSong.spotify_uri,
+            youtube_video_id: nextSong.youtube_video_id,
             song_name: nextSong.song_name,
             artist_name: nextSong.artist_name,
             album_art: nextSong.album_art,
@@ -523,67 +421,110 @@ export default function RoomPage() {
             updated_at: new Date().toISOString()
           })
           .eq('room_id', room.id)
+        
+        console.log("PLAYBACK UPDATE RESULT", result)
       } else {
-        await supabase.from('room_playback').update({ spotify_uri: null, song_name: null, artist_name: null, album_art: null, is_playing: false, playback_position: 0, duration_ms: 0 }).eq('room_id', room.id)
-        console.log("DEBUG: No next song, waiting 5s before AI DJ...")
-        setTimeout(() => autoAdvanceWithAiDJ(), 5000)
+        await supabase.from('room_playback').update({ youtube_video_id: null, song_name: null, artist_name: null, album_art: null, is_playing: false, playback_position: 0, duration_ms: 0 }).eq('room_id', room.id)
+        setTimeout(() => {
+          isAdvancingRef.current = false
+          autoAdvanceWithAiDJ()
+        }, 3000)
       }
       fetchRoomData()
     } catch (err) {
       console.error('skipToNext failed:', err)
+    } finally {
+      setTimeout(() => {
+        isAdvancingRef.current = false
+      }, 1000)
     }
   }, [isHost, room?.id, supabase, fetchRoomData, autoAdvanceWithAiDJ])
 
-  const deleteRoom = async () => {
-    if (!isHost || !room?.id) return
-    if (!confirm('Are you sure you want to delete this room?')) return
-    try {
-      const response = await fetch(`/api/rooms/${code}`, { method: 'DELETE' })
-      if (response.ok) router.push('/rooms')
-    } catch (error) {
-      console.error('Error deleting room:', error)
-    }
-  }
-
-  const syncToHost = useCallback(async () => {
-    if (isHost || !playback?.spotify_uri) return
-    console.log('DEBUG: Syncing to host via queue...', { uri: playback.spotify_uri })
+  const togglePlayback = useCallback(async () => {
+    if (!isHost || !room?.id || !playbackRef.current) return
+    
+    const currentPlayback = playbackRef.current
+    const newState = !currentPlayback.is_playing
 
     try {
-      const response = await fetch('/api/spotify/queue', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ uri: playback.spotify_uri })
-      })
-      
-      const data = await response.json()
-      
-      if (!response.ok) {
-        alert(`Failed to sync: ${data.error || 'Unknown error'}`)
-        return
-      }
-      
-      alert('Added to your Spotify queue! Press next on Spotify to hear it.')
+      await supabase
+        .from('room_playback')
+        .update({ is_playing: newState, updated_at: new Date().toISOString() })
+        .eq('room_id', room.id)
     } catch (err) {
-      console.error('Sync failed:', err)
-      alert('Failed to sync to host')
+      console.error('DEBUG: Playback toggle failed', err)
     }
-  }, [isHost, playback])
+  }, [isHost, room?.id])
 
-  const playOnMySpotify = async () => {
-    if (!playback?.spotify_uri) return
-    try {
-      const response = await fetch('/api/spotify/queue', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ uri: playback.spotify_uri })
-      })
-      if (response.ok) alert('Added to your Spotify queue!')
-      else alert('Failed to add to Spotify')
-    } catch (error) {
-      console.error('Error adding to Spotify:', error)
+  // YouTube Event Handlers
+  const onPlayerReady = (event: any) => {
+    console.log("PLAYER READY", event.target.getVideoData()?.video_id)
+    setPlayer(event.target)
+    setIsPlayerReady(true)
+    if (playbackRef.current?.is_playing && isHost) {
+      event.target.playVideo()
     }
   }
+
+  const onPlayerStateChange = (event: any) => {
+    if (!isHost) return
+    // ENDED
+    if (event.data === YouTube.PlayerState.ENDED) {
+      skipToNext()
+    }
+  }
+
+  const onPlayerError = (event: any) => {
+    if (!isHost) return
+    console.log("PLAYER ERROR", event.data, playbackRef.current?.youtube_video_id)
+    // 150/101 = embedding restricted or video unplayable
+    if (event.data === 150 || event.data === 101) {
+      console.log('Video restricted, skipping to next valid item...')
+      const currentVideoId = playbackRef.current?.youtube_video_id
+      if (currentVideoId) {
+        failedVideoIdsRef.current.add(currentVideoId)
+        console.log("BLACKLIST (added)", Array.from(failedVideoIdsRef.current))
+      }
+      skipToNext()
+    }
+  }
+
+  // Non-host users watch the playback position state
+  useEffect(() => {
+    if (isHost || !player || !isPlayerReady || !playback) return
+    
+    if (playback.is_playing) {
+      player.playVideo()
+      // Sync position if we drift more than 3 seconds
+      player.getCurrentTime().then((time: number) => {
+        if (Math.abs(time - playback.playback_position) > 3) {
+          player.seekTo(playback.playback_position, true)
+        }
+      })
+    } else {
+      player.pauseVideo()
+    }
+  }, [isHost, playback?.is_playing, playback?.playback_position, player, isPlayerReady])
+
+  const addAiSuggestionToQueue = useCallback(async () => {
+    if (!aiSuggestion || !room?.id) return
+    setIsSearching(true)
+    try {
+      const searchQuery = `${aiSuggestion.songName} ${aiSuggestion.artistName}`
+      const searchRes = await fetch(`/api/rooms/youtube-search?q=${encodeURIComponent(searchQuery)}`)
+      const tracks = await searchRes.json()
+      
+      if (tracks && tracks.length > 0) {
+        await addToQueue(tracks[0], true)
+      } else {
+        alert('Could not find a YouTube track for this suggestion.')
+      }
+    } catch (error) {
+      console.error('Error adding AI suggestion:', error)
+    } finally {
+      setIsSearching(false)
+    }
+  }, [aiSuggestion, room?.id, addToQueue])
 
   const sendReaction = async (type: string) => {
     if (!room?.id || !currentUser) return
@@ -620,8 +561,21 @@ export default function RoomPage() {
     )
   }
 
-  const upcomingQueue = queue.filter(song => !song.played && song.spotify_uri !== playback?.spotify_uri)
+  const upcomingQueue = queue.filter(song => !song.played && song.youtube_video_id !== playback?.youtube_video_id)
   const progress = playback?.duration_ms ? (playback.playback_position * 1000 / playback.duration_ms) * 100 : 0
+
+  console.log("YOUTUBE RENDER", playback?.youtube_video_id)
+
+  const youtubeOpts = {
+    height: '100%',
+    width: '100%',
+    playerVars: {
+      autoplay: 1,
+      controls: 0,
+      disablekb: 1,
+      origin: typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000'
+    },
+  }
 
   return (
     <div className="min-h-screen bg-black text-white font-sans selection:bg-purple-500/30">
@@ -646,15 +600,25 @@ export default function RoomPage() {
           </h2>
           
           <div className="space-y-4">
-            <div className="aspect-square rounded-2xl overflow-hidden bg-zinc-900 border border-zinc-800 shadow-2xl relative group">
-              {playback?.album_art ? (
-                <img src={playback.album_art} className="w-full h-full object-cover" alt="" />
+            <div className="aspect-video rounded-2xl overflow-hidden bg-zinc-900 border border-zinc-800 shadow-2xl relative group">
+              {playback?.youtube_video_id ? (
+                <div className="w-full h-full relative pointer-events-none">
+                   <YouTube 
+                     videoId={playback.youtube_video_id} 
+                     opts={youtubeOpts} 
+                     onReady={onPlayerReady}
+                     onStateChange={onPlayerStateChange}
+                     onError={onPlayerError}
+                     className="absolute inset-0 w-full h-full"
+                   />
+                   <div className="absolute inset-0 bg-transparent z-10" />
+                </div>
               ) : (
                 <div className="w-full h-full flex items-center justify-center text-zinc-600 italic p-12 text-center">
                   {isHost ? 'Search a song to start playing' : 'Waiting for host...'}
                 </div>
               )}
-              <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent flex items-end p-6">
+              <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent flex items-end p-6 z-20 pointer-events-none">
                 <div className="w-full">
                   <div className="h-1 w-full bg-zinc-800 rounded-full overflow-hidden mb-2">
                     <div className="h-full bg-purple-500 transition-all duration-1000" style={{ width: `${progress}%` }} />
@@ -675,7 +639,7 @@ export default function RoomPage() {
             )}
 
             <div className="flex gap-2">
-              {isHost ? (
+              {isHost && (
                 <>
                   <Button onClick={togglePlayback} className="flex-1 bg-white text-black hover:bg-zinc-200 rounded-full py-6 font-bold">
                     {playback?.is_playing ? <Pause className="mr-2 h-5 w-5" /> : <Play className="mr-2 h-5 w-5" />}
@@ -683,15 +647,6 @@ export default function RoomPage() {
                   </Button>
                   <Button variant="outline" onClick={skipToNext} className="border-zinc-800 rounded-full w-14 h-14 p-0">
                     <SkipForward className="h-5 w-5" />
-                  </Button>
-                </>
-              ) : (
-                <>
-                  <Button onClick={syncToHost} className="flex-1 bg-purple-600 hover:bg-purple-700 rounded-full py-6 font-bold">
-                    <RefreshCw className="mr-2 h-5 w-5" /> Sync To Host
-                  </Button>
-                  <Button onClick={playOnMySpotify} variant="outline" className="border-zinc-800 rounded-full px-6">
-                    <ExternalLink className="h-5 w-5" />
                   </Button>
                 </>
               )}
@@ -711,7 +666,7 @@ export default function RoomPage() {
               <Search className="absolute left-4 top-1/2 -translate-y-1/2 h-5 w-5 text-zinc-400" />
               <input
                 type="text"
-                placeholder="Search Spotify tracks..."
+                placeholder="Search YouTube..."
                 className="w-full bg-zinc-900 border border-zinc-800 rounded-2xl py-4 pl-12 pr-4 focus:ring-2 focus:ring-purple-500/50 outline-none"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
@@ -722,11 +677,11 @@ export default function RoomPage() {
             {searchResults.length > 0 && (
               <div className="absolute top-full mt-2 w-full bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden z-20 shadow-2xl">
                 {searchResults.map((track) => (
-                  <button key={track.id} onClick={() => addToQueue(track)} className="w-full p-4 flex items-center gap-4 hover:bg-zinc-800 transition-colors text-left border-b border-zinc-800/50 last:border-0">
-                    <img src={track.albumArt} className="w-12 h-12 rounded" alt="" />
+                  <button key={track.videoId} onClick={() => addToQueue(track)} className="w-full p-4 flex items-center gap-4 hover:bg-zinc-800 transition-colors text-left border-b border-zinc-800/50 last:border-0">
+                    <img src={track.thumbnail} className="w-12 h-12 rounded object-cover" alt="" />
                     <div className="flex-1 min-w-0">
-                      <div className="font-bold truncate">{track.name}</div>
-                      <div className="text-sm text-zinc-400 truncate">{track.artist}</div>
+                      <div className="font-bold truncate">{track.title}</div>
+                      <div className="text-sm text-zinc-400 truncate">{track.channelName}</div>
                     </div>
                     <Plus className="h-5 w-5 text-purple-500" />
                   </button>
